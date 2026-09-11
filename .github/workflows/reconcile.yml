@@ -27,9 +27,9 @@ jobs:
     # 对账要遍历所有上游、可能下载若干 APK，比事件处理慢。
     timeout-minutes: 90
     env:
-      # 执行体的仓库与文件名。写死，不走变量 —— 它们从不改变，而"能改的值"就是
-      # "会被改错的值"。
-      EXEC_REPO: market-of-labs/forge-core
+      # 上游 asset 名。写死，不走变量 —— 它从不改变，而"能改的值"就是"会被改错
+      # 的值"。action 按 **asset 原名**落盘，所以它同时就是本地文件名。
+      # ⚠️ 改这里要同时改 `Fetch executor` 的 `with.fileName`（两处必须一致）。
       EXEC_ASSET: forge-linux-amd64
     steps:
       # 取执行体：从 forge-core 的 Release 拿**最新**的二进制（不钉 tag）。
@@ -38,22 +38,33 @@ jobs:
       # "打 tag = 上生产"。浮动取 latest 是刻意的：改完代码打个 tag，本仓库
       # 一个字都不用动，下一轮对账就换新版。
       #
-      # ⚠️ 这一步先于二进制运行，而二进制自己那句 `::add-mask::` 只覆盖它**之后**
-      # 的输出 —— 所以 mask 必须在这里自己发一次。这不是特例：本仓库每个碰 token
-      # 的 step 都是这个写法（与 store 侧 forward.yml 同一条规矩）。
-      - name: Fetch executor
+      # ⚠️ 掩码必须先发，且只能拆成独立一步：二进制自己那句 `::add-mask::` 只覆盖
+      # 它**之后**的输出；而换成 action 之后，我们又没有它的 `run:` 可以写这一句。
+      # `::add-mask::` 是 job 级生效的，所以放在 action **之前**仍然覆盖 action
+      # 自己打的东西。
+      - name: Mask token
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
-        run: |
-          set -euo pipefail
-          echo "::add-mask::$GH_TOKEN"
-          # ⚠️ 没有位置参数 = 浮动取 latest（刻意的）。`gh release download` 的
-          # 位置参数是 **tag**，仓库只能由 --repo 给 —— 少写这个 flag 时 gh 会去
-          # 当前目录找 .git 猜仓库，而本 job 故意不 checkout，于是必然报
-          # "failed to run git: fatal: not a git repository"（2026-09-11 踩过）。
-          gh release download --repo "$EXEC_REPO" --pattern "$EXEC_ASSET" \
-            --output "$RUNNER_TEMP/forge-bin" --clobber
-          chmod +x "$RUNNER_TEMP/forge-bin"
+          MASK: ${{ secrets.GH_PAT }}
+        run: echo "::add-mask::$MASK"
+
+      - name: Fetch executor
+        uses: robinraju/release-downloader@v1
+        with:
+          repository: market-of-labs/forge-core
+          # 不钉 tag = **浮动取 latest**（刻意的，见上面的理由）。
+          latest: true
+          fileName: forge-linux-amd64
+          # 只能是 $GITHUB_WORKSPACE 下的相对路径。本 job 没有 checkout，但那个
+          # 目录 runner 已经建好了 —— 空着，正好放一个二进制。
+          out-file-path: .
+          # ⚠️ 不能吃默认值（默认是 `github.token`）：forge-core 是私有仓库，
+          # GITHUB_TOKEN 跨不了仓库（§6.2 不变量 1）。
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Make executable
+        # Release asset 不带执行位，得自己补。路径落在 $GITHUB_WORKSPACE 而不是
+        # 原来的 $RUNNER_TEMP —— 这个 action 只往工作目录里放东西。
+        run: chmod +x "$GITHUB_WORKSPACE/$EXEC_ASSET"
 
       # 一条命令跑完 §4.4 的四步：解析上游 → 镜像缺失版本 → 重建 index 与清单
       # → 自检 → 回写。**刻意不拆成多个 step**：拆开的话，中间某一步失败会留下
@@ -68,4 +79,4 @@ jobs:
         run: |
           set -euo pipefail
           echo "::add-mask::$STORE_TOKEN"
-          "$RUNNER_TEMP/forge-bin" reconcile
+          "$GITHUB_WORKSPACE/$EXEC_ASSET" reconcile

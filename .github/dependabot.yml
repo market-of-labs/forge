@@ -1,0 +1,23 @@
+version: 2
+
+# 三个仓库需要这个文件（依赖在哪，升级就该配在哪）：
+#   - `forge-core`：build.yml 的三个 action + go.mod；
+#   - `store`：forward.yml 的 `actions/github-script`；
+#   - 本仓库（`forge`）：取执行体那个 action（`robinraju/release-downloader@v1`）。
+#
+# 本仓库只有**一个**依赖，但正因为它用的是主版本标签（`@v1`），不配这个就等于钉死
+# 在当前主版本上 —— 而这个 action 跑的 job 握着能写三个仓库的 PAT（03 §4.5 第 11
+# 条的例外），让它停在旧主版本上是这里最不该省的一道自动。
+#
+# 不花 Actions 分钟数：本仓库的 workflow 只由 `repository_dispatch` / `schedule` /
+# 手动触发，Dependabot 开的是普通 PR，跑不起来任何东西。它也**只开 PR**，不合并、
+# 不打 tag，碰不到"取执行体 → 执行"那条链。
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # 只有一个依赖，合成一个 PR，别刷屏。
+    groups:
+      actions:
+        patterns: ['*']

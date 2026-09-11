@@ -35,27 +35,46 @@ jobs:
     # 兜底。正常一次几秒到几分钟；卡住时在这里被砍掉，而不是占满 6 小时的默认额度。
     timeout-minutes: 45
     env:
-      EXEC_REPO: market-of-labs/forge-core
+      # 上游 asset 名。action 按 **asset 原名**落盘、不改成别的名字，所以它同时
+      # 就是本地文件名 —— 下面 `Make executable` 与各 run: 步骤都靠它拼路径。
+      # ⚠️ 改这里要同时改 `Fetch executor` 的 `with.fileName`（两处必须一致）。
       EXEC_ASSET: forge-linux-amd64
     steps:
       # 本 job **不 checkout 任何东西** —— 这里没有源码要取，而 store 是二进制
-      # 自己浅克隆的（STORE_DIR 留空）。这是那条老规矩的更强版本：以前是"只
-      # checkout forge 自己，免得 PAT 落进工作副本的 .git/config"，现在是
-      # **根本没有工作副本**，PAT 连碰都碰不到。而二进制的 git 封装是用
-      # `-c credential.helper=` 一次性传凭据的，token 不落盘。
-      - name: Fetch executor
+      # 自己浅克隆的（STORE_DIR 留空）。二进制的 git 封装用 `-c credential.helper=`
+      # 一次性传凭据，token 不落盘。
+      #
+      # ⚠️ 但"不 checkout"**不再**等于"PAT 碰不到本 job"：取件改成 action 之后，
+      # PAT 是作为 `with.token` 交给一段第三方代码的。这是本次换件的代价，记在
+      # README 的「执行体从哪来」与 03 §4.5 第 11 条。
+      #
+      # ⚠️ 掩码**必须先于**它要覆盖的输出。`::add-mask::` 是 job 级生效的：本步
+      # 注册之后，余下所有 step 的日志 —— **包括下面那个 action 自己打的** ——
+      # 都会被遮蔽。换成 action 之后我们没法再在它的 `run:` 里发这一句（它没有
+      # run:），所以拆成一个独立 step 放在它前面，而不是干脆不发。
+      - name: Mask token
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
-        run: |
-          set -euo pipefail
-          echo "::add-mask::$GH_TOKEN"
-          # ⚠️ 没有位置参数 = 浮动取 latest（刻意的）。`gh release download` 的
-          # 位置参数是 **tag**，仓库只能由 --repo 给 —— 少写这个 flag 时 gh 会去
-          # 当前目录找 .git 猜仓库，而本 job 故意不 checkout，于是必然报
-          # "failed to run git: fatal: not a git repository"（2026-09-11 踩过）。
-          gh release download --repo "$EXEC_REPO" --pattern "$EXEC_ASSET" \
-            --output "$RUNNER_TEMP/forge-bin" --clobber
-          chmod +x "$RUNNER_TEMP/forge-bin"
+          MASK: ${{ secrets.GH_PAT }}
+        run: echo "::add-mask::$MASK"
+
+      - name: Fetch executor
+        uses: robinraju/release-downloader@v1
+        with:
+          repository: market-of-labs/forge-core
+          # 不钉 tag = **浮动取 latest**（刻意的，见 README「执行体从哪来」）。
+          latest: true
+          fileName: forge-linux-amd64
+          # 只能是 $GITHUB_WORKSPACE 下的相对路径。本 job 没有 checkout，但那个
+          # 目录 runner 已经建好了 —— 空着，正好放一个二进制。
+          out-file-path: .
+          # ⚠️ 不能吃默认值（默认是 `github.token`）：forge-core 是私有仓库，
+          # GITHUB_TOKEN 跨不了仓库（§6.2 不变量 1）。
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Make executable
+        # Release asset 不带执行位，得自己补。路径落在 $GITHUB_WORKSPACE 而不是
+        # 原来的 $RUNNER_TEMP —— 这个 action 只往工作目录里放东西。
+        run: chmod +x "$GITHUB_WORKSPACE/$EXEC_ASSET"
 
       - name: Handle event
         env:
@@ -72,7 +91,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "::add-mask::$STORE_TOKEN"
-          "$RUNNER_TEMP/forge-bin" handle-dispatch
+          "$GITHUB_WORKSPACE/$EXEC_ASSET" handle-dispatch
 
       # 注意 workflow_dispatch 时 client_payload 是空的，EVENT 因而退化成
       # 字面量 "workflow_dispatch" —— 那正是 handle-dispatch 的第四个分支

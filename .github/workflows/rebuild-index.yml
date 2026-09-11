@@ -27,22 +27,38 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
-      EXEC_REPO: market-of-labs/forge-core
+      # 上游 asset 名。action 按 **asset 原名**落盘，所以它同时就是本地文件名 ——
+      # 下面四个 run: 步骤都靠它拼路径。
+      # ⚠️ 改这里要同时改 `Fetch executor` 的 `with.fileName`（两处必须一致）。
       EXEC_ASSET: forge-linux-amd64
     steps:
-      - name: Fetch executor
+      # ⚠️ 掩码必须先发，且只能拆成独立一步：二进制自己那句 `::add-mask::` 只覆盖
+      # 它**之后**的输出；而换成 action 之后，我们又没有它的 `run:` 可以写这一句。
+      # `::add-mask::` 是 job 级生效的，所以放在 action **之前**仍然覆盖 action
+      # 自己打的东西。
+      - name: Mask token
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
-        run: |
-          set -euo pipefail
-          echo "::add-mask::$GH_TOKEN"
-          # ⚠️ 没有位置参数 = 浮动取 latest（刻意的）。`gh release download` 的
-          # 位置参数是 **tag**，仓库只能由 --repo 给 —— 少写这个 flag 时 gh 会去
-          # 当前目录找 .git 猜仓库，而本 job 故意不 checkout，于是必然报
-          # "failed to run git: fatal: not a git repository"（2026-09-11 踩过）。
-          gh release download --repo "$EXEC_REPO" --pattern "$EXEC_ASSET" \
-            --output "$RUNNER_TEMP/forge-bin" --clobber
-          chmod +x "$RUNNER_TEMP/forge-bin"
+          MASK: ${{ secrets.GH_PAT }}
+        run: echo "::add-mask::$MASK"
+
+      - name: Fetch executor
+        uses: robinraju/release-downloader@v1
+        with:
+          repository: market-of-labs/forge-core
+          # 不钉 tag = **浮动取 latest**（刻意的，见 README「执行体从哪来」）。
+          latest: true
+          fileName: forge-linux-amd64
+          # 只能是 $GITHUB_WORKSPACE 下的相对路径。本 job 没有 checkout，但那个
+          # 目录 runner 已经建好了 —— 空着，正好放一个二进制。
+          out-file-path: .
+          # ⚠️ 不能吃默认值（默认是 `github.token`）：forge-core 是私有仓库，
+          # GITHUB_TOKEN 跨不了仓库（§6.2 不变量 1）。
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Make executable
+        # Release asset 不带执行位，得自己补。路径落在 $GITHUB_WORKSPACE 而不是
+        # 原来的 $RUNNER_TEMP —— 这个 action 只往工作目录里放东西。
+        run: chmod +x "$GITHUB_WORKSPACE/$EXEC_ASSET"
 
       # 三步分开跑（而不是一条 `reconcile`）：重建索引与"去上游看有没有新版本"
       # 是两件不同的事，自愈时我们要的只是前者 —— 后者会把上游的新版本顺带镜像
@@ -65,9 +81,9 @@ jobs:
           set -euo pipefail
           echo "::add-mask::$STORE_TOKEN"
           if [ "$INPUT_FETCH_MISSING" = "true" ]; then
-            "$RUNNER_TEMP/forge-bin" build-index --fetch-missing
+            "$GITHUB_WORKSPACE/$EXEC_ASSET" build-index --fetch-missing
           else
-            "$RUNNER_TEMP/forge-bin" build-index
+            "$GITHUB_WORKSPACE/$EXEC_ASSET" build-index
           fi
 
       - name: Rebuild manifest
@@ -76,7 +92,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "::add-mask::$STORE_TOKEN"
-          "$RUNNER_TEMP/forge-bin" build-manifest
+          "$GITHUB_WORKSPACE/$EXEC_ASSET" build-manifest
 
       - name: Self-check
         env:
@@ -84,7 +100,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "::add-mask::$STORE_TOKEN"
-          "$RUNNER_TEMP/forge-bin" check-manifest
+          "$GITHUB_WORKSPACE/$EXEC_ASSET" check-manifest
 
       - name: Commit back
         env:
@@ -92,4 +108,4 @@ jobs:
         run: |
           set -euo pipefail
           echo "::add-mask::$STORE_TOKEN"
-          "$RUNNER_TEMP/forge-bin" commit-back -m "重建索引与清单（rebuild-index）"
+          "$GITHUB_WORKSPACE/$EXEC_ASSET" commit-back -m "重建索引与清单（rebuild-index）"

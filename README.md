@@ -50,19 +50,39 @@ Release 传 asset"这一整类竞态。
 
 ## 执行体从哪来
 
-```bash
-gh release download --repo market-of-labs/forge-core \
-  --pattern forge-linux-amd64 --output "$RUNNER_TEMP/forge-bin" --clobber
+```yaml
+- name: Fetch executor
+  uses: robinraju/release-downloader@v1      # 第三方 action，见下面的代价
+  with:
+    repository: market-of-labs/forge-core
+    latest: true                             # 不钉 tag ⇒ 浮动取 latest
+    fileName: forge-linux-amd64
+    out-file-path: .
+    token: ${{ secrets.GH_PAT }}
 ```
 
-**浮动取 latest，不钉 tag。** 仓库**只能**由 `--repo` 指定，**位置参数是 tag** ——
-所以"不写位置参数"本身就是"取 latest"，这一点是刻意的。反过来，把仓库名写成位置参数
-（`gh release download market-of-labs/forge-core`）是一处**踩过的坑**：gh 会把它当 tag，
-然后去当前目录找 `.git` 猜仓库，而本仓库的 job 故意不 checkout，于是必然失败于
-`failed to run git: fatal: not a git repository`（2026-09-11）。
+**浮动取 latest，不钉 tag。** `forge-core` 打完 tag，本仓库一个字都不用改，下一轮对账
+就换新版；要回滚就反过来做（把旧版本重新发成 latest 的成本，是刻意接受的，换来"改代码
+不必动本仓库"）。
 
-`forge-core` 打完 tag，本仓库一个字都不用改，下一轮对账就换新版；要回滚就反过来做
-（把旧版本重新发成 latest 的成本，是刻意接受的，换来"改代码不必动本仓库"）。
+两处不能想当然：**`out-file-path` 只接受 `$GITHUB_WORKSPACE` 下的相对路径**，而且这个
+action 按 **asset 原名**落盘、不改名 —— 所以二进制在 `$GITHUB_WORKSPACE/forge-linux-amd64`，
+后面每一步都得用这个路径（不再是 `$RUNNER_TEMP/forge-bin`）。Release asset **不携带执行位**，
+所以另有一个 `chmod +x` 的小步骤。
+
+> ⚠️ **代价：这是本仓库唯一的第三方 action，而它跑的 job 握着能写三个仓库的 PAT。**
+> 换之前这一步是 `gh release download` —— 那是一个**命令**而不是 action：runner 镜像
+> 自带、GitHub 自己维护，不进 `uses:`、没有要升级或 review 的依赖树。换过来之后，每次
+> 它跑起来都有一份第三方代码在 PAT 的权限下执行；换来的只是"用现成的 action"这件事本身。
+>
+> 版本取**主版本标签 `@v1`**（与仓库里其它 action 一致）。代价是维护者对 `v1` 的任何
+> 一次推送都会直接进这个 job —— 钉 `@v1.13` 或 commit SHA 能挡住这个。取舍与理由见
+> 03 §4.5 第 11 条。跟新主版本交给 `.github/dependabot.yml`（本仓库从没配过，这是它
+> 第一个依赖）：它只**开 PR**、不合并、不打 tag，而本仓库的 workflow 也不在 PR 上
+> 触发，所以既不改变线上跑的是什么，也不花分钟数。
+>
+> 它**自己不发 `::add-mask::`**（`src/` 里没有任何 `setSecret`），所以规则 9 那一步被
+> 拆成了一个独立的 step 放在它**前面** —— 不能因为"action 没有 `run:` 可写"就不发。
 
 ⚠️ **这条链的性质：`forge-core` 打 tag = 上生产。** 因为那个二进制是**带着能写
 `store` 的 PAT 执行的**。所以那边一个 tag 只允许对应一个二进制 —— 重跑同一个 tag
@@ -85,14 +105,16 @@ gh release download --repo market-of-labs/forge-core \
 | 6 | **只用 unpublish（`draft: true`），绝不 delete** | 删 Release 会让 tag 消失；曾开过 Immutable Releases 则**永久烧毁该 tag**，而 tag = appId |
 | 7 | 每个回写 commit 带 `[skip-dispatch]` | PAT 触发的 push **不被抑制**，会再次触发转发 → 死循环 |
 | 8 | 禁 `set -x`、禁 `curl -v`、token 绝不拼进 URL | 公有仓库的 Actions 日志**任何登录用户都能读** |
-| 9 | **每个碰 token 的 step 自己先发一次** `::add-mask::$TOKEN` | GitHub 自动脱敏的 token 模式表里只有 `ghp_/gho_/ghu_/ghs_/ghr_`，**不含 `github_pat_`** |
+| 9 | **每个碰 token 的 step 自己先发一次** `::add-mask::$TOKEN` —— 取件那一步现在是个 action、没有 `run:` 可写，所以那一句被拆成一个独立的 step 放在它**前面** | GitHub 自动脱敏的 token 模式表里只有 `ghp_/gho_/ghu_/ghs_/ghr_`，**不含 `github_pat_`** |
 | 10 | 执行体只从 `forge-core` 的 Release 取；那边发布用 `overwrite_files: false`，tag 与二进制一一对应 | 浮动取 latest ⇒ 发布即上生产。若允许覆写 asset，cron 跑的代码会变、而 tag 没变，事后无迹可查。⚠️ 重跑已发过的 tag 是**跳过**（绿着过去），不是报错 |
-| 11 | **本仓库的 workflow 一个 `uses:` 都没有** —— 连第一方 action 都不用，只用 runner 自带的 CLI | 这三个 job 里握着能写三个仓库的 PAT（§6.2）。加一个 action = 在这个权限下多跑一段别人的代码，而它们要做的只是 `gh release download` + 执行我们的二进制 —— `gh` 是 runner 镜像自带的**第一方 CLI**，够用，所以连"只用第一方 action"这条更松的线都不必用到。**判据可推广**：第三方 action 只许出现在**不握 PAT** 的 job 里（`forge-core/build.yml` 就是 —— 它只用本仓库的 `GITHUB_TOKEN`）；握 PAT 的 job 里最多只能用**官方** action —— `store/forward.yml` 正是这个形状：它**握着 PAT**，用的是官方 `actions/github-script`。⚠️ 别把这两者记反：`store` 那个 job 合规的理由是"官方"，**不是"没 PAT"** |
+| 11 | **握 PAT 的 job 只许用官方 action 或 runner 自带的 CLI；第三方 action 只许出现在不握 PAT 的 job 里**。⚠️ 本仓库**有一处已知的、明确接受的例外**：取执行体那一步是第三方 action（`robinraju/release-downloader`，见上面「执行体从哪来」），而它跑的正是握 PAT 的 job —— 代价与取舍写在那里 | 判据不是"这个 action 好不好"，是"**这段代码是谁写的、它在什么权限下跑**"。三个 job 握着能写三个仓库的 PAT（§6.2）⇒ 加一个第三方 action = 在这个权限下多跑一段别人的代码。**两个参照物别记反**：`forge-core/build.yml` 用第三方发布 action，它**不握 PAT**（只有本仓库的 `GITHUB_TOKEN`）；`store/forward.yml` **握着 PAT**，用的是官方 `actions/github-script` —— 它合规的理由是"官方"，**不是"没 PAT"** |
 
-**规则 9 的落点在这套拆分之后变了。** 执行体自己在启动时也会发一句 `::add-mask::`，
-但那只覆盖**它之后**的输出 —— 而 `Fetch executor` 那一步**先于**它运行、且已经握着
-PAT。所以规矩从"二进制负责发"变成"**每个碰 token 的 step 自己发**"，`Fetch executor`
-也不例外。`store/forward.yml` 早就是这个写法，本仓库现在跟上。
+**规则 9 的落点改过两次。** 执行体自己在启动时也会发一句 `::add-mask::`，但那只覆盖
+**它之后**的输出 —— 而取件那一步**先于**它运行、且已经握着 PAT。所以规矩先是变成
+"**每个碰 token 的 step 自己发**"（`store/forward.yml` 早就是这个写法）。再后来取件从
+`gh release download` 换成了 action，`Fetch executor` 连 `run:` 都没有了 —— 于是那一句
+搬进了一个**独立的 `Mask token` step**，位置在 action **之前**：`::add-mask::` 是 job 级
+生效的，放在前面一样覆盖 action 自己打的东西。
 
 规则 7 的落点仍然在代码里（`job.Ctx.CommitBack` 是回写 store 的唯一出口，
 无条件补上 `[skip-dispatch]`），只是那段代码现在住在 `forge-core`。
@@ -109,18 +131,22 @@ PAT。所以规矩从"二进制负责发"变成"**每个碰 token 的 step 自�
 | `forge`（本仓库） | Contents **R/W** | `repository_dispatch` 要的是目标仓库的 Contents，**不是 Actions**。只用前者，所以取更小的集合 |
 | `forge-core` | Contents **R** | 下载执行体 Release 的 asset |
 
-存放：**每个仓库各存一份，secret 名统一叫 `GH_PAT`**（本仓库一份、`store` 一份，
-**两份填同一把值**）。**90 天轮换**（fine-grained PAT 最长 1 年，不设满）。
+存放：**两个仓库都要解析得到 `GH_PAT`**（**仓库级或组织级都行**；现状是 `store` 用
+仓库级、本仓库走组织级），**值填同一把**。**90 天轮换**（fine-grained PAT 最长 1 年，不设满）。
 
-> ⚠️ **secret 名统一了，环境变量名没有 —— 别顺手改后者。**
-> 同一个值在 workflow 里以两个身份出现：`GH_TOKEN: ${{ secrets.GH_PAT }}`
-> 是为了让 `gh release download` 认（`gh` 和 git 的 credential helper 只读 `GH_TOKEN`），
-> `STORE_TOKEN: ${{ secrets.GH_PAT }}` 是为了让那个 Go 二进制认（`internal/job/env.go`
-> 的常量就叫 `STORE_TOKEN`）。**统一成同一个 env 名会让其中一方静默读不到值。**
+> ⚠️ **secret 名统一了，"读它的那个名字"没有 —— 别顺手改后者。**
+> 同一个值在 workflow 里以两个身份出现：`token: ${{ secrets.GH_PAT }}` 是**取件那个
+> action 的 input 名**，`STORE_TOKEN: ${{ secrets.GH_PAT }}` 是为了让那个 Go 二进制认
+> （`internal/job/env.go` 的常量就叫 `STORE_TOKEN`）。**把后者改成别的名字会让二进制
+> 静默读不到值。**
+>
+> 历史上这里还有第三个名字：`GH_TOKEN`。那是 `gh release download` 要的（`gh` 与 git
+> 的 credential helper 只读这个名字）—— 取件换成 action 之后它就没有了。
 
 三个 workflow 的 `permissions` 都是 `{}` —— 本仓库没有源码要 checkout，`GITHUB_TOKEN`
 一个权限都用不上：取执行体走 PAT，写 `store` 也走 PAT（`GITHUB_TOKEN` 跨不了仓库）。
-这也是为什么本仓库**一次 checkout 都没有**：没有工作副本，PAT 就碰不到 `.git/config`。
+本仓库**一次 checkout 都没有**：没有源码要取，也就没有工作副本里的 `.git/config` 可以
+把 PAT 漏进去 —— ⚠️ 但这**不等于**"PAT 碰不到本仓库"，取件那个 action 是拿着它的（规则 11）。
 
 ---
 
