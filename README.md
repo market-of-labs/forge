@@ -103,9 +103,14 @@ PAT。所以规矩从"二进制负责发"变成"**每个碰 token 的 step 自�
 | `forge`（本仓库） | Contents **R/W** | `repository_dispatch` 要的是目标仓库的 Contents，**不是 Actions**。只用前者，所以取更小的集合 |
 | `forge-core` | Contents **R** | 下载执行体 Release 的 asset |
 
-存放：`store` secrets → `FORGE_DISPATCH_TOKEN`；`forge` secrets → `STORE_WRITE_TOKEN`
-（`Fetch executor` 与各动词都用它）。**同一把值**。**90 天轮换**
-（fine-grained PAT 最长 1 年，不设满）。
+存放：**每个仓库各存一份，secret 名统一叫 `GH_PAT`**（本仓库一份、`store` 一份，
+**两份填同一把值**）。**90 天轮换**（fine-grained PAT 最长 1 年，不设满）。
+
+> ⚠️ **secret 名统一了，环境变量名没有 —— 别顺手改后者。**
+> 同一个值在 workflow 里以两个身份出现：`GH_TOKEN: ${{ secrets.GH_PAT }}`
+> 是为了让 `gh release download` 认（`gh` 和 git 的 credential helper 只读 `GH_TOKEN`），
+> `STORE_TOKEN: ${{ secrets.GH_PAT }}` 是为了让那个 Go 二进制认（`internal/job/env.go`
+> 的常量就叫 `STORE_TOKEN`）。**统一成同一个 env 名会让其中一方静默读不到值。**
 
 三个 workflow 的 `permissions` 都是 `{}` —— 本仓库没有源码要 checkout，`GITHUB_TOKEN`
 一个权限都用不上：取执行体走 PAT，写 `store` 也走 PAT（`GITHUB_TOKEN` 跨不了仓库）。

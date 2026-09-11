@@ -43,7 +43,7 @@ jobs:
       # 的 step 都是这个写法（与 store 侧 forward.yml 同一条规矩）。
       - name: Fetch executor
         env:
-          GH_TOKEN: ${{ secrets.STORE_WRITE_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           set -euo pipefail
           echo "::add-mask::$GH_TOKEN"
@@ -60,7 +60,7 @@ jobs:
       # 所以变红 = 真的有问题，不会出现"红着但东西已经推上去了"。
       - name: Reconcile
         env:
-          STORE_TOKEN: ${{ secrets.STORE_WRITE_TOKEN }}
+          STORE_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           set -euo pipefail
           echo "::add-mask::$STORE_TOKEN"

@@ -32,7 +32,7 @@ jobs:
     steps:
       - name: Fetch executor
         env:
-          GH_TOKEN: ${{ secrets.STORE_WRITE_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           set -euo pipefail
           echo "::add-mask::$GH_TOKEN"
@@ -51,7 +51,7 @@ jobs:
       # MkdirTemp 克隆的），那个设置当初只是因为二进制恰好建在 checkout 里。
       - name: Rebuild index
         env:
-          STORE_TOKEN: ${{ secrets.STORE_WRITE_TOKEN }}
+          STORE_TOKEN: ${{ secrets.GH_PAT }}
           # 输入走 env，**不进 run: 的文本** —— 与其它两个 workflow 同一条规矩。
           # 这次插值的虽然是个布尔型输入（GitHub 会强制它只能是 true/false），
           # 但"哪里可以插值"这种规矩一旦有例外，下一次就会有人照着例外写，
@@ -68,7 +68,7 @@ jobs:
 
       - name: Rebuild manifest
         env:
-          STORE_TOKEN: ${{ secrets.STORE_WRITE_TOKEN }}
+          STORE_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           set -euo pipefail
           echo "::add-mask::$STORE_TOKEN"
@@ -76,7 +76,7 @@ jobs:
 
       - name: Self-check
         env:
-          STORE_TOKEN: ${{ secrets.STORE_WRITE_TOKEN }}
+          STORE_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           set -euo pipefail
           echo "::add-mask::$STORE_TOKEN"
@@ -84,7 +84,7 @@ jobs:
 
       - name: Commit back
         env:
-          STORE_TOKEN: ${{ secrets.STORE_WRITE_TOKEN }}
+          STORE_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           set -euo pipefail
           echo "::add-mask::$STORE_TOKEN"
