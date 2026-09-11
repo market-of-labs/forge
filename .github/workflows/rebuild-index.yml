@@ -1,0 +1,91 @@
+name: rebuild-index
+
+# 索引自愈的兜底入口（03 §4.1）。**只有手动触发**：它做的是"从 Release 现状重建
+# index.json 与 apps.json"，那是灾难恢复动作，时机该由人决定而不是由定时器决定。
+#
+# 什么时候用它：
+#   - index.json 被改坏 / 清空 / 删掉了；
+#   - 有人手工往 Release 传了 asset，想让清单立刻反映出来；
+#   - reconcile 因为清单缺 versionCode 而自检失败（规则 6）——这时勾上 fetch_missing。
+on:
+  workflow_dispatch:
+    inputs:
+      fetch_missing:
+        description: '下载 APK 补齐缺失的 versionCode（慢、耗流量，索引丢失后必选）'
+        type: boolean
+        default: true
+
+# 本仓库只有 workflow，没有源码 → GITHUB_TOKEN 不需要任何权限（见 on-dispatch.yml）。
+permissions: {}
+
+concurrency:
+  group: store-write
+  cancel-in-progress: false
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      EXEC_REPO: market-of-labs/forge-core
+      EXEC_ASSET: forge-linux-amd64
+    steps:
+      - name: Fetch executor
+        env:
+          GH_TOKEN: ${{ secrets.STORE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$GH_TOKEN"
+          gh release download "$EXEC_REPO" --pattern "$EXEC_ASSET" \
+            --output "$RUNNER_TEMP/forge-bin" --clobber
+          chmod +x "$RUNNER_TEMP/forge-bin"
+
+      # 三步分开跑（而不是一条 `reconcile`）：重建索引与"去上游看有没有新版本"
+      # 是两件不同的事，自愈时我们要的只是前者 —— 后者会把上游的新版本顺带镜像
+      # 进来，那是 reconcile 的职责，不该在这次操作里发生。
+      #
+      # ⚠️ 但 build-index 之后**必须**跟 build-manifest：清单里的 expectedVersionCode
+      # 直接来自索引，只重建索引不重建清单，两者的版本号就会对不上。
+      #
+      # 这几个 step 不再有 `working-directory`：二进制不依赖 cwd（store 是它自己
+      # MkdirTemp 克隆的），那个设置当初只是因为二进制恰好建在 checkout 里。
+      - name: Rebuild index
+        env:
+          STORE_TOKEN: ${{ secrets.STORE_WRITE_TOKEN }}
+          # 输入走 env，**不进 run: 的文本** —— 与其它两个 workflow 同一条规矩。
+          # 这次插值的虽然是个布尔型输入（GitHub 会强制它只能是 true/false），
+          # 但"哪里可以插值"这种规矩一旦有例外，下一次就会有人照着例外写，
+          # 而下一个插进去的可能正是 string 型的自由文本。
+          INPUT_FETCH_MISSING: ${{ inputs.fetch_missing }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$STORE_TOKEN"
+          if [ "$INPUT_FETCH_MISSING" = "true" ]; then
+            "$RUNNER_TEMP/forge-bin" build-index --fetch-missing
+          else
+            "$RUNNER_TEMP/forge-bin" build-index
+          fi
+
+      - name: Rebuild manifest
+        env:
+          STORE_TOKEN: ${{ secrets.STORE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$STORE_TOKEN"
+          "$RUNNER_TEMP/forge-bin" build-manifest
+
+      - name: Self-check
+        env:
+          STORE_TOKEN: ${{ secrets.STORE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$STORE_TOKEN"
+          "$RUNNER_TEMP/forge-bin" check-manifest
+
+      - name: Commit back
+        env:
+          STORE_TOKEN: ${{ secrets.STORE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$STORE_TOKEN"
+          "$RUNNER_TEMP/forge-bin" commit-back -m "重建索引与清单（rebuild-index）"

