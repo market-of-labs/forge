@@ -87,7 +87,7 @@ gh release download --repo market-of-labs/forge-core \
 | 8 | 禁 `set -x`、禁 `curl -v`、token 绝不拼进 URL | 公有仓库的 Actions 日志**任何登录用户都能读** |
 | 9 | **每个碰 token 的 step 自己先发一次** `::add-mask::$TOKEN` | GitHub 自动脱敏的 token 模式表里只有 `ghp_/gho_/ghu_/ghs_/ghr_`，**不含 `github_pat_`** |
 | 10 | 执行体只从 `forge-core` 的 Release 取；那边发布用 `overwrite_files: false`，tag 与二进制一一对应 | 浮动取 latest ⇒ 发布即上生产。若允许覆写 asset，cron 跑的代码会变、而 tag 没变，事后无迹可查。⚠️ 重跑已发过的 tag 是**跳过**（绿着过去），不是报错 |
-| 11 | **本仓库的 workflow 只用第一方 action，一个第三方 action 都不许加** | 这三个 job 里握着能写三个仓库的 PAT（§6.2）。第三方 action = 在这个权限下多跑一段别人的代码；而它们要做的只是 `gh release download` + 执行我们的二进制，`gh` 是 runner 镜像自带的第一方 CLI，够用。**对照组**：`store/forward.yml` 用的是官方 `actions/github-script`，`forge-core/build.yml` 用第三方发布 action —— 那两个 job 都不握 PAT |
+| 11 | **本仓库的 workflow 一个 `uses:` 都没有** —— 连第一方 action 都不用，只用 runner 自带的 CLI | 这三个 job 里握着能写三个仓库的 PAT（§6.2）。加一个 action = 在这个权限下多跑一段别人的代码，而它们要做的只是 `gh release download` + 执行我们的二进制 —— `gh` 是 runner 镜像自带的**第一方 CLI**，够用，所以连"只用第一方 action"这条更松的线都不必用到。**判据可推广**：第三方 action 只许出现在**不握 PAT** 的 job 里（`forge-core/build.yml` 就是 —— 它只用本仓库的 `GITHUB_TOKEN`）；握 PAT 的 job 里最多只能用**官方** action —— `store/forward.yml` 正是这个形状：它**握着 PAT**，用的是官方 `actions/github-script`。⚠️ 别把这两者记反：`store` 那个 job 合规的理由是"官方"，**不是"没 PAT"** |
 
 **规则 9 的落点在这套拆分之后变了。** 执行体自己在启动时也会发一句 `::add-mask::`，
 但那只覆盖**它之后**的输出 —— 而 `Fetch executor` 那一步**先于**它运行、且已经握着
