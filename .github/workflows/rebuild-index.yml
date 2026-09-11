@@ -36,7 +36,11 @@ jobs:
         run: |
           set -euo pipefail
           echo "::add-mask::$GH_TOKEN"
-          gh release download "$EXEC_REPO" --pattern "$EXEC_ASSET" \
+          # ⚠️ 没有位置参数 = 浮动取 latest（刻意的）。`gh release download` 的
+          # 位置参数是 **tag**，仓库只能由 --repo 给 —— 少写这个 flag 时 gh 会去
+          # 当前目录找 .git 猜仓库，而本 job 故意不 checkout，于是必然报
+          # "failed to run git: fatal: not a git repository"（2026-09-11 踩过）。
+          gh release download --repo "$EXEC_REPO" --pattern "$EXEC_ASSET" \
             --output "$RUNNER_TEMP/forge-bin" --clobber
           chmod +x "$RUNNER_TEMP/forge-bin"
 

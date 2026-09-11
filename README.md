@@ -51,13 +51,18 @@ Release 传 asset"这一整类竞态。
 ## 执行体从哪来
 
 ```bash
-gh release download market-of-labs/forge-core \
+gh release download --repo market-of-labs/forge-core \
   --pattern forge-linux-amd64 --output "$RUNNER_TEMP/forge-bin" --clobber
 ```
 
-**浮动取 latest，不钉 tag。** `forge-core` 打完 tag，本仓库一个字都不用改，
-下一轮对账就换新版；要回滚就反过来做（把旧版本重新发成 latest 的成本，是刻意接受的，
-换来"改代码不必动本仓库"）。
+**浮动取 latest，不钉 tag。** 仓库**只能**由 `--repo` 指定，**位置参数是 tag** ——
+所以"不写位置参数"本身就是"取 latest"，这一点是刻意的。反过来，把仓库名写成位置参数
+（`gh release download market-of-labs/forge-core`）是一处**踩过的坑**：gh 会把它当 tag，
+然后去当前目录找 `.git` 猜仓库，而本仓库的 job 故意不 checkout，于是必然失败于
+`failed to run git: fatal: not a git repository`（2026-09-11）。
+
+`forge-core` 打完 tag，本仓库一个字都不用改，下一轮对账就换新版；要回滚就反过来做
+（把旧版本重新发成 latest 的成本，是刻意接受的，换来"改代码不必动本仓库"）。
 
 ⚠️ **这条链的性质：`forge-core` 打 tag = 上生产。** 因为那个二进制是**带着能写
 `store` 的 PAT 执行的**。所以那边一个 tag 只允许对应一个二进制 —— 重跑同一个 tag
@@ -81,7 +86,8 @@ gh release download market-of-labs/forge-core \
 | 7 | 每个回写 commit 带 `[skip-dispatch]` | PAT 触发的 push **不被抑制**，会再次触发转发 → 死循环 |
 | 8 | 禁 `set -x`、禁 `curl -v`、token 绝不拼进 URL | 公有仓库的 Actions 日志**任何登录用户都能读** |
 | 9 | **每个碰 token 的 step 自己先发一次** `::add-mask::$TOKEN` | GitHub 自动脱敏的 token 模式表里只有 `ghp_/gho_/ghu_/ghs_/ghr_`，**不含 `github_pat_`** |
-| 10 | 执行体只从 `forge-core` 的 Release 取；那边的 tag 与二进制一一对应，重跑同一个 tag 被拒 | 浮动取 latest ⇒ 发布即上生产。若允许覆写 asset，cron 跑的代码会变、而 tag 没变，事后无迹可查 |
+| 10 | 执行体只从 `forge-core` 的 Release 取；那边发布用 `overwrite_files: false`，tag 与二进制一一对应 | 浮动取 latest ⇒ 发布即上生产。若允许覆写 asset，cron 跑的代码会变、而 tag 没变，事后无迹可查。⚠️ 重跑已发过的 tag 是**跳过**（绿着过去），不是报错 |
+| 11 | **本仓库的 workflow 只用第一方 action，一个第三方 action 都不许加** | 这三个 job 里握着能写三个仓库的 PAT（§6.2）。第三方 action = 在这个权限下多跑一段别人的代码；而它们要做的只是 `gh release download` + 执行我们的二进制，`gh` 是 runner 镜像自带的第一方 CLI，够用。**对照组**：`store/forward.yml` 用的是官方 `actions/github-script`，`forge-core/build.yml` 用第三方发布 action —— 那两个 job 都不握 PAT |
 
 **规则 9 的落点在这套拆分之后变了。** 执行体自己在启动时也会发一句 `::add-mask::`，
 但那只覆盖**它之后**的输出 —— 而 `Fetch executor` 那一步**先于**它运行、且已经握着
