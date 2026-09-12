@@ -37,7 +37,7 @@
 | workflow | 触发 | 干什么 |
 |---|---|---|
 | `on-dispatch.yml` | `repository_dispatch: store-event` · `workflow_dispatch` | 按事件分派：申请单 / `_incoming` 搬运 / 单应用收敛 / 全量对账 |
-| `reconcile.yml` | `schedule`（每日 03:17 UTC）· `workflow_dispatch` | 全量对账（§4.4）。**幂等 = 漏跑自愈** |
+| `reconcile.yml` | `schedule`（每日 **18:17 UTC = 北京 02:17**）· `workflow_dispatch` | 全量对账（§4.4）。**幂等 = 漏跑自愈** |
 | `rebuild-index.yml` | `workflow_dispatch`（**仅手动**） | 灾难恢复：从 Release 现状重建各来源的 `versions` 账本与 `apps.json` |
 
 `store` 侧的 `forward.yml` 把事件**原样转告**过来 —— 它只发一个信标（事件名、issue 号、
