@@ -22,7 +22,7 @@
 
 | 仓库 | 可见性 | 装什么 | 能不能丢 |
 |---|---|---|---|
-| `market-of-labs/store` | 私有（部署期） | **数据**：`sources/` · `apps.json` · `store/index.json` · Releases | **不能**。它是唯一的事实 |
+| `market-of-labs/store` | 私有（部署期） | **数据**：`sources/`（含 `versions` 账本）· `apps.json` · Releases | **不能**。它是唯一的事实 |
 | **`market-of-labs/forge`（本仓库）** | 公有 | **只有 workflow**：3 个 YAML | 能。删了重建即可，什么都没存 |
 | `market-of-labs/forge-core` | 私有 | **执行体**：Go 源码 + 构建 workflow + 二进制 Release | 不能（它是源码仓库） |
 | `market-of-labs/companion` | 公有 | 伴侣应用源码。它的 Release 被 `store` 当成一个普通的 github 上游 | 不能（它是源码仓库） |
@@ -38,7 +38,7 @@
 |---|---|---|
 | `on-dispatch.yml` | `repository_dispatch: store-event` · `workflow_dispatch` | 按事件分派：申请单 / `_incoming` 搬运 / 单应用收敛 / 全量对账 |
 | `reconcile.yml` | `schedule`（每日 03:17 UTC）· `workflow_dispatch` | 全量对账（§4.4）。**幂等 = 漏跑自愈** |
-| `rebuild-index.yml` | `workflow_dispatch`（**仅手动**） | 灾难恢复：从 Release 现状重建 `index.json` 与 `apps.json` |
+| `rebuild-index.yml` | `workflow_dispatch`（**仅手动**） | 灾难恢复：从 Release 现状重建各来源的 `versions` 账本与 `apps.json` |
 
 `store` 侧的 `forward.yml` 把事件**原样转告**过来 —— 它只发一个信标（事件名、issue 号、
 release tag、sha），内容由执行体自己用 API 读。所以外部字符串进不了执行环境。
@@ -127,7 +127,7 @@ action 按 **asset 原名**落盘、不改名 —— 所以二进制在 `$GITHUB
 
 | 仓库 | 需要 | 为什么 |
 |---|---|---|
-| `store` | Contents **R/W** + Issues **R/W** | 回写 `sources/`、`apps.json`、`index.json`；建/改 Release 与 asset；读申请、回评、关单 |
+| `store` | Contents **R/W** + Issues **R/W** | 回写 `sources/`（含账本）、`apps.json`；建/改 Release 与 asset；读申请、回评、关单 |
 | `forge`（本仓库） | Contents **R/W** | `repository_dispatch` 要的是目标仓库的 Contents，**不是 Actions**。只用前者，所以取更小的集合 |
 | `forge-core` | Contents **R** | 下载执行体 Release 的 asset |
 

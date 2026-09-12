@@ -1,17 +1,18 @@
 name: rebuild-index
 
-# 索引自愈的兜底入口（03 §4.1）。**只有手动触发**：它做的是"从 Release 现状重建
-# index.json 与 apps.json"，那是灾难恢复动作，时机该由人决定而不是由定时器决定。
+# 账本自愈的兜底入口（03 §4.1）。**只有手动触发**：它做的是"从 Release 现状重建
+# 各 sources 条目的 versions 账本与 apps.json"，那是灾难恢复动作，时机该由人决定
+# 而不是由定时器决定。
 #
 # 什么时候用它：
-#   - index.json 被改坏 / 清空 / 删掉了；
+#   - sources 里的 versions 账本被改坏 / 清空 / 删掉了；
 #   - 有人手工往 Release 传了 asset，想让清单立刻反映出来；
 #   - reconcile 因为清单缺 versionCode 而自检失败（规则 6）——这时勾上 fetch_missing。
 on:
   workflow_dispatch:
     inputs:
       fetch_missing:
-        description: '下载 APK 补齐缺失的 versionCode（慢、耗流量，索引丢失后必选）'
+        description: '下载 APK 补齐缺失的 versionCode（慢、耗流量，账本丢失后必选）'
         type: boolean
         default: true
 
@@ -60,12 +61,12 @@ jobs:
         # 原来的 $RUNNER_TEMP —— 这个 action 只往工作目录里放东西。
         run: chmod +x "$GITHUB_WORKSPACE/$EXEC_ASSET"
 
-      # 三步分开跑（而不是一条 `reconcile`）：重建索引与"去上游看有没有新版本"
+      # 三步分开跑（而不是一条 `reconcile`）：重建账本与"去上游看有没有新版本"
       # 是两件不同的事，自愈时我们要的只是前者 —— 后者会把上游的新版本顺带镜像
       # 进来，那是 reconcile 的职责，不该在这次操作里发生。
       #
-      # ⚠️ 但 build-index 之后**必须**跟 build-manifest：清单里的 expectedVersionCode
-      # 直接来自索引，只重建索引不重建清单，两者的版本号就会对不上。
+      # ⚠️ 但 build-index 之后**必须**跟 build-manifest：清单里的 versionCode
+      # 直接来自账本，只重建账本不重建清单，两者的版本号就会对不上。
       #
       # 这几个 step 不再有 `working-directory`：二进制不依赖 cwd（store 是它自己
       # MkdirTemp 克隆的），那个设置当初只是因为二进制恰好建在 checkout 里。
@@ -108,4 +109,4 @@ jobs:
         run: |
           set -euo pipefail
           echo "::add-mask::$STORE_TOKEN"
-          "$GITHUB_WORKSPACE/$EXEC_ASSET" commit-back -m "重建索引与清单（rebuild-index）"
+          "$GITHUB_WORKSPACE/$EXEC_ASSET" commit-back -m "重建账本与清单（rebuild-index）"
