@@ -49,11 +49,13 @@ sha），内容由执行体自己用 API 读。所以外部字符串进不了执
 `workflow_dispatch` 按钮**：`verb` 二选一，发过来的仍是同一个信标（verb 放进"事件名"
 那个字段），所以下面这一段对它也成立。
 
-`on-dispatch.yml` 的手动按钮是**搬运 `_incoming` 唯一的两种叫法之一**（另一种是上传 CI
-自己发的信标）：队列常驻 draft，没有"发布即搬运"那条自动路 —— 往 Release 上传/改名/删
-asset 不触发任何事件（03 §3.3），传完文件不会有谁来替你发车。所以按钮的 `verb` 缺省值
-是 `intake-incoming`（另一个选项 `reconcile` = 全量对账）。`verb` 用 `choice` 类型而不是
-自由文本：取值由 GitHub 服务端**先校验**，进 job 时已经是一个封闭集合的成员。
+`on-dispatch.yml` 的手动按钮是**搬运 `_incoming` 三条路之一**：日常那条是人上传完在 `store` 的
+Release 页面上点 **Publish**（`release: published` → `forward.yml` 翻译成 `intake-incoming`，
+D57），第三条是上传 CI 自己发的信标。**这一条是兜底**：Publish 那条路没反应时点它，效果一样 ——
+往 Release 上传/改名/删 asset 不触发任何事件（03 §3.3），所以发车必须挂在别的动作上，而那条
+链一旦哑掉就得有人能手动叫。所以按钮的 `verb` 缺省值是 `intake-incoming`（另一个选项
+`reconcile` = 全量对账）。`verb` 用 `choice` 类型而不是自由文本：取值由 GitHub 服务端**先校验**，
+进 job 时已经是一个封闭集合的成员。
 
 > **日常点是 `store` 那个，不是这里这个。** 两者等效（都落到同一个 `EVENT`），但人是在
 > `store` 的 Release 页面上传的 APK，按钮就在同一页的 Actions 里 —— 不用切仓库。本仓库
@@ -113,9 +115,9 @@ action 按 **asset 原名**落盘、不改名 —— 所以二进制在 `$GITHUB
 
 | # | 规矩 | 防的是什么 |
 |---|---|---|
-| 1 | `store` 侧**根本不监听 `release`** | 裸 `on: release` = 全部 7 种动作，会在无关操作上发车；而写死 `[published]` 只服务"发布即发车"那一种设计 —— 队列常驻 draft 之后那条设计不存在了 |
-| 2 | 搬运只从 `intake-incoming` 来（手动按钮 / 上传 CI 的信标），**没有闸门** | 旧闸门（`tag_name == '_incoming' && !prerelease`）的唯一职责是筛掉广播流里"不是队列发布"的事件。来源变成**显式指名**之后，广播流与闸门一起消失 —— 少一个能判错的地方 |
-| 3 | 幂等：`_incoming` 无 asset → 退出；目标 asset 名已存在 → 跳过。⚠️ **出口仍要 PATCH `draft:true`**（无条件动作，不是"搬成功后的事"） | 重复 dispatch、并发重跑；以及**队列万一卡在 published** —— 那之后上传什么都不再触发，且网页上按不动 Publish，只能手工 Convert to draft |
+| 1 | `store` 侧**只放行队列那一种 `release`**（`on: release: [published]` + job 级 `if:` 筛 `tag_name == '_incoming'`，两条**同进同出**，见 03 §2.6） | 裸 `on: release` = 全部 7 种动作，会在无关操作上发车；而不加闸门的 `[published]` 会把**任何** Release 的发布都广播过来（含本仓库自己发的正式版本），而 forge 对不认识的事件是**硬错**的 —— 症状是"每发一个正式版本多一次 forge 红" |
+| 2 | 搬运只从 `intake-incoming` 来（Publish 被 `store` 翻译成它 / 手动按钮 / 上传 CI 的信标），**本仓库侧没有闸门** | 旧闸门（`tag_name == '_incoming' && !prerelease`）的职责是筛掉广播流里"不是队列发布"的事件，现在筛在**广播流的入口**（`store`，规则 1），forge 连收都收不到 —— 没有"收到不认识的事件"这一整类故障。⚠️ 别在这边补一道同样的检查：同一件事有两处判断 = 两处能判错的地方 |
+| 3 | 幂等：`_incoming` 无 asset → 退出；目标 asset 名已存在 → 跳过。⚠️ **出口仍要 PATCH `draft:true` + `tag_name`**（无条件动作，不是"搬成功后的事"），并在 unpublish 成功后**删掉 `refs/tags/_incoming`** | 重复 dispatch、并发重跑；把"人点的那次 Publish"收回去；以及**下次 Publish 解析到旧的 forward.yml** —— `release` 事件跑的是 tag 所指提交上那份文件，而引用一旦建立就不再移动（03 §3.2）。⚠️ PATCH 省掉 `tag_name` 会把队列名降级成 `untagged-<sha>`，之后谁也认不出它 |
 | 4 | 内部 Release 操作一律 `make_latest: false` | 每次 draft→published 都重打 `published_at`，`/releases/latest` 会抖 |
 | 5 | `intake-incoming` 有两个按钮入口，门槛都是**该仓库的 write**：本仓库的 `on-dispatch`（**公有**仓，写权限名单必须短）与 `store` 的 `forward-to-forge`（私有仓，名单 = 本来就够得着 `_incoming` 的那批人，见 03 §4.5 第 5 条） | 这两个按钮**直接引发一次对 `store` 的写入**。`workflow_dispatch` 要写权限才能点，于是**协作者名单就是这条链的授权面** —— 加人之前得知道这一点。⚠️ `store` 那个**不扩大**授权面：能点它的人本来就能往 `_incoming` 传文件 |
 | 6 | **只用 unpublish（`draft: true`），绝不 delete** | 删 Release 会让 tag 消失；曾开过 Immutable Releases 则**永久烧毁该 tag**，而 tag = appId |
