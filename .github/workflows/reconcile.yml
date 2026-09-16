@@ -88,5 +88,6 @@ jobs:
           STORE_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           set -euo pipefail
-          echo "::add-mask::$STORE_TOKEN"
+          # 这里**不再**掩码：上面那个 `Mask token` 步骤已经 job 级生效（同一把 PAT），
+          # 而二进制启动后第一件事也是 env.AddMask()。再掩一次是纯重复。
           "$GITHUB_WORKSPACE/$EXEC_ASSET" reconcile
