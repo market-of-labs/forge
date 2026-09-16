@@ -3,7 +3,7 @@
 本仓库**不含任何 Go 源码**。它只做一件事：按事件把**执行体**取下来，跑一遍。
 
 执行体（Go 源码、构建、二进制 Release）在私有的 **`market-of-labs/forge-core`**，
-本仓库的三个 workflow 从它的 Release 里拉最新的二进制来执行。程序本身怎么跑、
+本仓库的两个 workflow 从它的 Release 里拉最新的二进制来执行。程序本身怎么跑、
 有哪些动词、怎么本地调试 —— 见那个仓库的 README。
 
 设计文档：`03-maintenance-action.md` 定义这套维护动作（下文凡写 `02 §x` / `03 §x`
@@ -23,7 +23,7 @@
 | 仓库 | 可见性 | 装什么 | 能不能丢 |
 |---|---|---|---|
 | `market-of-labs/store` | 私有（部署期） | **数据**：`sources/`（含 `versions` 账本）· `apps.json` · Releases | **不能**。它是唯一的事实 |
-| **`market-of-labs/forge`（本仓库）** | 公有 | **只有 workflow**：3 个 YAML | 能。删了重建即可，什么都没存 |
+| **`market-of-labs/forge`（本仓库）** | 公有 | **只有 workflow**：2 个 YAML | 能。删了重建即可，什么都没存 |
 | `market-of-labs/forge-core` | 私有 | **执行体**：Go 源码 + 构建 workflow + 二进制 Release | 不能（它是源码仓库） |
 | `market-of-labs/companion` | **私有**（D55） | 伴侣应用源码。它的 Release 被 `store` 当成一个普通的 github 上游 —— 私有仓 ⇒ **带 PAT 读**（同 `forge-core` 那条，见下「凭据」） | 不能（它是源码仓库） |
 
@@ -32,13 +32,17 @@
 
 ---
 
-## 三个 workflow
+## 两个 workflow
 
 | workflow | 触发 | 干什么 |
 |---|---|---|
 | `on-dispatch.yml` | `repository_dispatch: store-event` · `workflow_dispatch`（**手动按钮**，`verb` 二选一） | 按事件分派：申请单 / `_incoming` 搬运 / 单应用收敛 / 全量对账 |
 | `reconcile.yml` | `schedule`（每日 **18:17 UTC = 北京 02:17**）· `workflow_dispatch` | 全量对账（§4.4）。**幂等 = 漏跑自愈** |
-| `rebuild-index.yml` | `workflow_dispatch`（**仅手动**） | 灾难恢复：从 Release 现状重建各来源的 `versions` 账本与 `apps.json` |
+
+从前还有一个 `rebuild-index.yml`（手动跑的"账本灾难恢复"）。删掉了（D56）：账本是
+派生数据，而它唯一的自动恢复途径本来就在日常路径上 —— 账本里没有 `upstreamTag` 的
+最新版本会在下一轮对账里被重新镜像，重读上游 APK 时元数据就填回来了（`recordIndex`）。
+真出了 git 事故，回滚 `sources/{appId}.json` 比下载更准、给得还更多。
 
 `store` 侧的 `forward.yml` 把事件**原样转告**过来 —— 它只发一个信标（事件名、issue 号、
 sha），内容由执行体自己用 API 读。所以外部字符串进不了执行环境。**它自己也有一个
@@ -55,7 +59,7 @@ asset 不触发任何事件（03 §3.3），传完文件不会有谁来替你发
 > `store` 的 Release 页面上传的 APK，按钮就在同一页的 Actions 里 —— 不用切仓库。本仓库
 > 这个留着，是因为改执行体的人常在这儿，能顺手看一眼 run 的日志。
 
-三个 workflow 共用一条 `store-write` 并发队列，串行化消灭了"两个事件同时往同一个
+两个 workflow 共用一条 `store-write` 并发队列，串行化消灭了"两个事件同时往同一个
 Release 传 asset"这一整类竞态。
 
 ---
@@ -156,7 +160,7 @@ action 按 **asset 原名**落盘、不改名 —— 所以二进制在 `$GITHUB
 > 历史上这里还有第三个名字：`GH_TOKEN`。那是 `gh release download` 要的（`gh` 与 git
 > 的 credential helper 只读这个名字）—— 取件换成 action 之后它就没有了。
 
-三个 workflow 的 `permissions` 都是 `{}` —— 本仓库没有源码要 checkout，`GITHUB_TOKEN`
+两个 workflow 的 `permissions` 都是 `{}` —— 本仓库没有源码要 checkout，`GITHUB_TOKEN`
 一个权限都用不上：取执行体走 PAT，写 `store` 也走 PAT（`GITHUB_TOKEN` 跨不了仓库）。
 本仓库**一次 checkout 都没有**：没有源码要取，也就没有工作副本里的 `.git/config` 可以
 把 PAT 漏进去 —— ⚠️ 但这**不等于**"PAT 碰不到本仓库"，取件那个 action 是拿着它的（规则 11）。
