@@ -25,7 +25,7 @@
 | `market-of-labs/store` | 私有（部署期） | **数据**：`sources/`（含 `versions` 账本）· `apps.json` · Releases | **不能**。它是唯一的事实 |
 | **`market-of-labs/forge`（本仓库）** | 公有 | **只有 workflow**：3 个 YAML | 能。删了重建即可，什么都没存 |
 | `market-of-labs/forge-core` | 私有 | **执行体**：Go 源码 + 构建 workflow + 二进制 Release | 不能（它是源码仓库） |
-| `market-of-labs/companion` | 公有 | 伴侣应用源码。它的 Release 被 `store` 当成一个普通的 github 上游 | 不能（它是源码仓库） |
+| `market-of-labs/companion` | **私有**（D55） | 伴侣应用源码。它的 Release 被 `store` 当成一个普通的 github 上游 —— 私有仓 ⇒ **带 PAT 读**（同 `forge-core` 那条，见下「凭据」） | 不能（它是源码仓库） |
 
 执行体是**编译后的二进制**：`strings` 与反汇编读不回设计意图，而源码留在私有仓库。
 于是"跑"这个动作落在公开仓库的免费额度上，源码不必跟着公开。
@@ -82,7 +82,7 @@ action 按 **asset 原名**落盘、不改名 —— 所以二进制在 `$GITHUB
 后面每一步都得用这个路径（不再是 `$RUNNER_TEMP/forge-bin`）。Release asset **不携带执行位**，
 所以另有一个 `chmod +x` 的小步骤。
 
-> ⚠️ **代价：这是本仓库唯一的第三方 action，而它跑的 job 握着能写三个仓库的 PAT。**
+> ⚠️ **代价：这是本仓库唯一的第三方 action，而它跑的 job 握着能跨四个仓库的 PAT。**
 > 换之前这一步是 `gh release download` —— 那是一个**命令**而不是 action：runner 镜像
 > 自带、GitHub 自己维护，不进 `uses:`、没有要升级或 review 的依赖树。换过来之后，每次
 > 它跑起来都有一份第三方代码在 PAT 的权限下执行；换来的只是"用现成的 action"这件事本身。
@@ -119,7 +119,7 @@ action 按 **asset 原名**落盘、不改名 —— 所以二进制在 `$GITHUB
 | 8 | 禁 `set -x`、禁 `curl -v`、token 绝不拼进 URL | 公有仓库的 Actions 日志**任何登录用户都能读** |
 | 9 | **每个碰 token 的 step 自己先发一次** `::add-mask::$TOKEN` —— 取件那一步现在是个 action、没有 `run:` 可写，所以那一句被拆成一个独立的 step 放在它**前面** | GitHub 自动脱敏的 token 模式表里只有 `ghp_/gho_/ghu_/ghs_/ghr_`，**不含 `github_pat_`** |
 | 10 | 执行体只从 `forge-core` 的 Release 取；那边发布用 `overwrite_files: false`，tag 与二进制一一对应 | 浮动取 latest ⇒ 发布即上生产。若允许覆写 asset，cron 跑的代码会变、而 tag 没变，事后无迹可查。⚠️ 重跑已发过的 tag 是**跳过**（绿着过去），不是报错 |
-| 11 | **握 PAT 的 job 只许用官方 action 或 runner 自带的 CLI；第三方 action 只许出现在不握 PAT 的 job 里**。⚠️ 本仓库**有一处已知的、明确接受的例外**：取执行体那一步是第三方 action（`robinraju/release-downloader`，见上面「执行体从哪来」），而它跑的正是握 PAT 的 job —— 代价与取舍写在那里 | 判据不是"这个 action 好不好"，是"**这段代码是谁写的、它在什么权限下跑**"。三个 job 握着能写三个仓库的 PAT（§6.2）⇒ 加一个第三方 action = 在这个权限下多跑一段别人的代码。**两个参照物别记反**：`forge-core/build.yml` 用第三方发布 action，它**不握 PAT**（只有本仓库的 `GITHUB_TOKEN`）；`store/forward.yml` **握着 PAT**，用的是官方 `actions/github-script` —— 它合规的理由是"官方"，**不是"没 PAT"** |
+| 11 | **握 PAT 的 job 只许用官方 action 或 runner 自带的 CLI；第三方 action 只许出现在不握 PAT 的 job 里**。⚠️ 本仓库**有一处已知的、明确接受的例外**：取执行体那一步是第三方 action（`robinraju/release-downloader`，见上面「执行体从哪来」），而它跑的正是握 PAT 的 job —— 代价与取舍写在那里 | 判据不是"这个 action 好不好"，是"**这段代码是谁写的、它在什么权限下跑**"。三个 job 握着能跨四个仓库的 PAT（§6.2）⇒ 加一个第三方 action = 在这个权限下多跑一段别人的代码。**两个参照物别记反**：`forge-core/build.yml` 用第三方发布 action，它**不握 PAT**（只有本仓库的 `GITHUB_TOKEN`）；`store/forward.yml` **握着 PAT**，用的是官方 `actions/github-script` —— 它合规的理由是"官方"，**不是"没 PAT"** |
 
 **规则 9 的落点改过两次。** 执行体自己在启动时也会发一句 `::add-mask::`，但那只覆盖
 **它之后**的输出 —— 而取件那一步**先于**它运行、且已经握着 PAT。所以规矩先是变成
@@ -135,13 +135,14 @@ action 按 **asset 原名**落盘、不改名 —— 所以二进制在 `$GITHUB
 
 ## 凭据
 
-**一把 fine-grained PAT**，覆盖三个仓库：
+**一把 fine-grained PAT**，覆盖四个仓库：
 
 | 仓库 | 需要 | 为什么 |
 |---|---|---|
 | `store` | Contents **R/W** + Issues **R/W** | 回写 `sources/`（含账本）、`apps.json`；建/改 Release 与 asset；读申请、回评、关单 |
 | `forge`（本仓库） | Contents **R/W** | `repository_dispatch` 要的是目标仓库的 Contents，**不是 Actions**。只用前者，所以取更小的集合 |
 | `forge-core` | Contents **R** | 下载执行体 Release 的 asset |
+| `companion` | Contents **R** | 把它的 Release 当**上游镜像**（列 Release、下 asset）。它是**私有仓**（D55）—— 匿名读不到，而读它的那个客户端本来就带这把 PAT，所以只需在这一行加个仓库、**零代码改动** |
 
 存放：**两个仓库都要解析得到 `GH_PAT`**（**仓库级或组织级都行**；现状是 `store` 用
 仓库级、本仓库走组织级），**值填同一把**。**90 天轮换**（fine-grained PAT 最长 1 年，不设满）。

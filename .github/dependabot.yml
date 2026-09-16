@@ -6,7 +6,7 @@ version: 2
 #   - 本仓库（`forge`）：取执行体那个 action（`robinraju/release-downloader@v1`）。
 #
 # 本仓库只有**一个**依赖，但正因为它用的是主版本标签（`@v1`），不配这个就等于钉死
-# 在当前主版本上 —— 而这个 action 跑的 job 握着能写三个仓库的 PAT（03 §4.5 第 11
+# 在当前主版本上 —— 而这个 action 跑的 job 握着能跨四个仓库的 PAT（03 §4.5 第 11
 # 条的例外），让它停在旧主版本上是这里最不该省的一道自动。
 #
 # 不花 Actions 分钟数：本仓库的 workflow 只由 `repository_dispatch` / `schedule` /
