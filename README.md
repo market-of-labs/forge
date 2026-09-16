@@ -41,13 +41,19 @@
 | `rebuild-index.yml` | `workflow_dispatch`（**仅手动**） | 灾难恢复：从 Release 现状重建各来源的 `versions` 账本与 `apps.json` |
 
 `store` 侧的 `forward.yml` 把事件**原样转告**过来 —— 它只发一个信标（事件名、issue 号、
-sha），内容由执行体自己用 API 读。所以外部字符串进不了执行环境。
+sha），内容由执行体自己用 API 读。所以外部字符串进不了执行环境。**它自己也有一个
+`workflow_dispatch` 按钮**：`verb` 二选一，发过来的仍是同一个信标（verb 放进"事件名"
+那个字段），所以下面这一段对它也成立。
 
 `on-dispatch.yml` 的手动按钮是**搬运 `_incoming` 唯一的两种叫法之一**（另一种是上传 CI
 自己发的信标）：队列常驻 draft，没有"发布即搬运"那条自动路 —— 往 Release 上传/改名/删
 asset 不触发任何事件（03 §3.3），传完文件不会有谁来替你发车。所以按钮的 `verb` 缺省值
 是 `intake-incoming`（另一个选项 `reconcile` = 全量对账）。`verb` 用 `choice` 类型而不是
 自由文本：取值由 GitHub 服务端**先校验**，进 job 时已经是一个封闭集合的成员。
+
+> **日常点是 `store` 那个，不是这里这个。** 两者等效（都落到同一个 `EVENT`），但人是在
+> `store` 的 Release 页面上传的 APK，按钮就在同一页的 Actions 里 —— 不用切仓库。本仓库
+> 这个留着，是因为改执行体的人常在这儿，能顺手看一眼 run 的日志。
 
 三个 workflow 共用一条 `store-write` 并发队列，串行化消灭了"两个事件同时往同一个
 Release 传 asset"这一整类竞态。
@@ -107,7 +113,7 @@ action 按 **asset 原名**落盘、不改名 —— 所以二进制在 `$GITHUB
 | 2 | 搬运只从 `intake-incoming` 来（手动按钮 / 上传 CI 的信标），**没有闸门** | 旧闸门（`tag_name == '_incoming' && !prerelease`）的唯一职责是筛掉广播流里"不是队列发布"的事件。来源变成**显式指名**之后，广播流与闸门一起消失 —— 少一个能判错的地方 |
 | 3 | 幂等：`_incoming` 无 asset → 退出；目标 asset 名已存在 → 跳过。⚠️ **出口仍要 PATCH `draft:true`**（无条件动作，不是"搬成功后的事"） | 重复 dispatch、并发重跑；以及**队列万一卡在 published** —— 那之后上传什么都不再触发，且网页上按不动 Publish，只能手工 Convert to draft |
 | 4 | 内部 Release 操作一律 `make_latest: false` | 每次 draft→published 都重打 `published_at`，`/releases/latest` 会抖 |
-| 5 | `intake-incoming` 的门槛 = 对 `forge` 的 **Contents: write**；本仓库是**公有**的，所以那份写权限名单必须短 | 这个按钮**直接引发一次对 `store` 的写入**。公有仓库的 `workflow_dispatch` 要写权限才能点，于是**协作者名单就是这条链的授权面** —— 加人之前得知道这一点 |
+| 5 | `intake-incoming` 有两个按钮入口，门槛都是**该仓库的 write**：本仓库的 `on-dispatch`（**公有**仓，写权限名单必须短）与 `store` 的 `forward-to-forge`（私有仓，名单 = 本来就够得着 `_incoming` 的那批人，见 03 §4.5 第 5 条） | 这两个按钮**直接引发一次对 `store` 的写入**。`workflow_dispatch` 要写权限才能点，于是**协作者名单就是这条链的授权面** —— 加人之前得知道这一点。⚠️ `store` 那个**不扩大**授权面：能点它的人本来就能往 `_incoming` 传文件 |
 | 6 | **只用 unpublish（`draft: true`），绝不 delete** | 删 Release 会让 tag 消失；曾开过 Immutable Releases 则**永久烧毁该 tag**，而 tag = appId |
 | 7 | 每个回写 commit 带 `[skip-dispatch]` | PAT 触发的 push **不被抑制**，会再次触发转发 → 死循环 |
 | 8 | 禁 `set -x`、禁 `curl -v`、token 绝不拼进 URL | 公有仓库的 Actions 日志**任何登录用户都能读** |
