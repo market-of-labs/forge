@@ -14,6 +14,15 @@ name: spike-fdroid-repo
 #   5. `fdroid update` 是否把 APK 改名成 `{pkg}_{versionCode}.apk`（REFS F3）
 #   6. `nativecode` / `signer` 是否被写进 manifest（REFS §7 第 3 条）
 #
+# ⚠️ **第一次跑的结论（run 35180635917，2026-09-17）：`fdroid update` 在 ubuntu-latest 上
+# 直接崩。** 原因是**版本**而不是用法：Ubuntu 24.04 的 `fdroidserver 2.2.1` 带的是
+# `androguard 3.4.0~a1-6`，它解析现代 APK（Flutter + 新 AGP）的 `resources.arsc` 时会
+#      raise ResParserError("res1 must be zero!")
+# 同一个文件、同一行在 trixie 的 `3.4.0~a1-17` 里已改成 `log.warning`，forky 的 `4.1.3`
+# 干脆没有这个检查。这就是 CalyxOS 要 pin `fdroidserver 2.3.4`、breezy-weather 要用
+# `debian:testing` 而**不是**发行版自带包的原因。所以下面固定用 `debian:trixie` ——
+# **不要再改回 ubuntu-latest 自带的 fdroidserver**。
+#
 # 它刻意满足本仓库的加固清单（README「加固清单」）：
 #   · **不 checkout 任何东西** —— 本仓库没有源码，这个 job 也不需要
 #   · **不握任何 secret** —— keystore 现场生成、用完即弃；APK 取自公开上游
@@ -37,6 +46,10 @@ permissions: {}
 jobs:
   spike:
     runs-on: ubuntu-latest
+    # ⚠️ 必须是 Debian 容器（理由见文件头那次失败的结论）。trixie 是当前 stable，
+    # 所以这一行现在是**可复现**的；等它变成 oldstable 之后要再评估一次。
+    container:
+      image: debian:trixie
     timeout-minutes: 20
     env:
       # 被测对象用**公开上游的一个真实 APK**。选 Obtainium 是因为它同时提供
@@ -45,25 +58,30 @@ jobs:
       BASE: https://github.com/ImranR98/Obtainium/releases/latest/download
       PKG: dev.imranr.obtainium
     steps:
-      # fdroidserver 走 apt（Ubuntu universe 自带），JDK 只为 `jarsigner` 而装 ——
-      # 后者是 JAR 签名的唯一实现路径（REFS F2），装了它就不必自己实现签名。
+      # JDK 只为 `jarsigner` 而装 —— 后者是 JAR 签名的唯一实现路径（REFS F2），
+      # 装了它就不必自己实现签名。
+      # ⚠️ `nodejs` 是给 `actions/upload-artifact` 用的：**container job 里的 JS action
+      # 跑在容器内**，容器里没有 node 它就会失败。这不是可有可无的包。
       - name: Install fdroidserver and JDK
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends \
-            fdroidserver default-jdk-headless unzip jq curl ca-certificates
+          # 容器里就是 root，不需要 sudo。
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            fdroidserver default-jdk-headless unzip jq curl ca-certificates nodejs
 
-          # 把版本钉进 summary：fdroidserver 的行为随版本变（CalyxOS pin 的就是 2.3.4），
-          # 结论要能对应到一个具体版本才有意义。
+          # 把版本钉进 summary：fdroidserver/androguard 的行为随版本变（上面那次失败
+          # 就是版本问题），结论要能对应到具体版本才有意义。
           {
             echo "### 环境"
             echo
             echo '| 工具 | 输出 |'
             echo '|---|---|'
             echo "| \`fdroid\` | $(fdroid --version 2>&1 | head -1) |"
+            echo "| \`androguard\`(dpkg) | $(dpkg-query -W -f='${Version}' python3-androguard 2>/dev/null || echo '未知') |"
             echo "| \`jarsigner\` | \`$(command -v jarsigner || echo '**不在 PATH**')\` |"
             echo "| \`java\` | $(java -version 2>&1 | head -1) |"
+            echo "| \`node\` | $(node --version 2>&1 | head -1) |"
             echo "| \`python3\` | $(python3 --version 2>&1) |"
             echo
           } >> "$GITHUB_STEP_SUMMARY"
@@ -122,6 +140,8 @@ jobs:
             'keypass: spikepass' \
             "keydname: \"$DN\"" \
             > fdroid/config.yml
+          # 0600 否则 fdroid 会打一句 unsafe permissions 的警告（第一次跑就有）。
+          chmod 600 fdroid/config.yml
           cat fdroid/config.yml
 
       - name: fdroid update
@@ -135,7 +155,11 @@ jobs:
 
       # 断言**不用 `set -e`**：一次跑完所有检查、把结论一次给全，比"第一个失败就中断"
       # 有用得多 —— 这个 job 的价值就在于把"哪几条成立、哪几条不成立"一次说清。
+      #
+      # `if: always()` 是刻意的：上一次 `fdroid update` 一失败，这一步就被 skip，
+      # 于是"到底缺了哪些产物"一个字都没留下。让它照跑，红的那几条本身就是现场记录。
       - name: Assert artifacts
+        if: always()
         run: |
           set -uo pipefail
 
