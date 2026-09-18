@@ -184,6 +184,16 @@ jobs:
       # 于是"到底缺了哪些产物"一个字都没留下。让它照跑，红的那几条本身就是现场记录。
       - name: Assert artifacts
         if: always()
+        # ⚠️ **必须显式覆盖 shell。** GitHub 给内置 `bash` 用的命令行是
+        # `bash --noprofile --norc -e -o pipefail {0}` —— 那个 `-e` 写在命令行上，
+        # 脚本里的 `set -uo pipefail` **关不掉它**。少了下面这一行，"跑完所有断言、
+        # 一次给全结论"的设计就是空的：第一条非零命令静默终止整步，日志里只有一句
+        # `##[error]Process completed with exit code 1.`。
+        #
+        # 这次没出事纯属**碰巧**：前几条断言都是 `t "…" test -f …`，而 `if` 天然免疫 `-e`。
+        # 真正暴露它的是 `spike-keystore.yml`（run 35292638722，本步 0.3 秒 exit 1、零输出），
+        # 那条链的第一条命令是 `keytool … | grep`，grep 没选中就返回 1，当场毙命。
+        shell: bash --noprofile --norc -o pipefail {0}
         run: |
           set -uo pipefail
 
