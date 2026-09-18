@@ -48,8 +48,15 @@
 ⚠️ **第一列（`name:`）是给人看的，路由靠的是第二列那个文件名，两者互不影响** ——
 `repository_dispatch: types:` 里的 `source-change` / `intake-incoming` / `reconcile` 是**两个仓之间的
 线协议**，`store` 侧发出的词必须与这里逐字相同，改 `name:` 一个字都不会动到它。
-`store` 侧的同名文件在界面上叫 **`申请单·转发` / `搬运队列·转发` / `对账·转发`**（名字里的"转发"就是
+`store` 侧的同名文件在界面上叫 **`申请单·转发` / `搬运队列·转发`**（名字里的"转发"就是
 它俩的分工差别：那边只转告，这边才动手）。
+
+⚠️ **`reconcile` 这个词目前没有人发**（2026-09-18）：`store` 侧那个只做转发的 `reconcile.yml` 已删除，
+对账的三个触发面 —— 每日 cron、手动按钮、`repository_dispatch` —— **全部落在本文件上**，
+所以"今天跑了几次对账"只在**一个仓库**里数得清。上面那一行里的 `repository_dispatch: reconcile`
+是**有意留着**的监听面（一条已发布出去的线协议，撤掉是不可逆的：以后外部脚本或 bookmarklet 再发它
+就是 204 静默丢弃），目前**无发送方**。本仓库的 `store` 侧入口文件也因此只剩两个：`source-change.yml`
+（申请单）与 `intake-incoming.yml`（搬队列 + 它的手动按钮）。
 
 从前这三个是一个 `on-dispatch.yml`：一个文件收下所有事件，再交给执行体的
 `handle-dispatch` 按 payload 里的一个字符串分派。那条走法有三处代价 —— 入口的真假要靠读
@@ -71,7 +78,8 @@
 最新版本会在下一轮对账里被重新镜像，重读上游 APK 时元数据就填回来了（`recordIndex`）。
 真出了 git 事故，回滚 `sources/{appId}.json` 比下载更准、给得还更多。
 
-`store` 侧的三个同名文件把事件**原样转告**过来 —— 只发一个信标（issue 号、ref、sha），
+`store` 侧的同名文件（两个 —— `source-change.yml` / `intake-incoming.yml`；对账没有对面的文件，
+见上）把事件**原样转告**过来 —— 只发一个信标（issue 号、ref、sha），
 内容由执行体自己用 API 读。所以外部字符串进不了执行环境。
 
 `intake-incoming.yml` 的手动按钮是**搬运 `_incoming` 三条路之一**：日常那条是人上传完在
