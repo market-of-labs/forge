@@ -6,10 +6,9 @@ version: 2
 #     store/.github/dependabot.yml）；
 #   - 本仓库（`forge`）：`fetch-executor` 复合动作里的两个 —— `actions/cache@v6`
 #     与 `robinraju/release-downloader@v1`（拆工作流之前它们散在三个 workflow 里、
-#     逐字重复，现在只有这一处）。⚠️ `on-dispatch.yml` 里那份逐字重复的同类步骤不算
-#     —— 它属灰度的最后一步、要删掉的（market-spec 03 §4.7 第 5 步）。
-#     （`spike-fdroid-repo.yml` 里那个 `actions/upload-artifact@v7` 曾经也在，
-#     该文件已于 2026-09-18 删除。）
+#     逐字重复，现在只有这一处）。`on-dispatch.yml` 里那份逐字重复的同类步骤随该文件
+#     一起没了（2026-09-18，market-spec 03 §4.7 第 5 步）；`spike-fdroid-repo.yml`
+#     里那个 `actions/upload-artifact@v7` 也一样（同一天删）。
 #
 # 本仓库只有**两个**依赖，但正因为它们用的是主版本标签（`@v6` / `@v1`），不配这个就等于
 # 钉死在当前主版本上 —— 而这两个 action 跑的 job 握着能跨四个仓库的 PAT（03 §4.5 第 11

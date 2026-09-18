@@ -55,7 +55,7 @@
 对账的三个触发面 —— 每日 cron、手动按钮、`repository_dispatch` —— **全部落在本文件上**，
 所以"今天跑了几次对账"只在**一个仓库**里数得清。上面那一行里的 `repository_dispatch: reconcile`
 是**有意留着**的监听面（一条已发布出去的线协议，撤掉是不可逆的：以后外部脚本或 bookmarklet 再发它
-就是 204 静默丢弃），目前**无发送方**。本仓库的 `store` 侧入口文件也因此只剩两个：`source-change.yml`
+就是 204 静默丢弃），目前**无发送方**。`store` 侧的入口文件也因此只剩两个：`source-change.yml`
 （申请单）与 `intake-incoming.yml`（搬队列 + 它的手动按钮）。
 
 从前这三个是一个 `on-dispatch.yml`：一个文件收下所有事件，再交给执行体的
@@ -63,15 +63,16 @@
 四段式的 `||` 表达式才知道；"漏填 `verb`"就能静默跑错功能；两个 workflow 之间有十几行
 逐字重复（已抽成 `.github/actions/` 下两个复合动作）。
 
-⚠️ **`on-dispatch.yml` 仍在库里，但它是灰度的兼容壳、不是第四种设计** —— 拆分的顺序不能反：
-`release` 事件跑的是 **tag 所指提交**上的 workflow 文件，而 `_incoming` 的 tag 引用要等
-`cleanIncoming` 把旧引用删掉、下一次 Publish 重建之后才会指向新文件。在那之前 Publish 那条路
-跑的仍是旧提交上那份 `forward.yml`，发出来的还是 `types: [store-event]`，所以这条监听必须活到
-**确认引用刷新过**之后才删（连同 `handle-dispatch` 动词、`FDROID_*` secrets 一起，market-spec 03 §4.7 第 5 步）。
+**`on-dispatch.yml` 已于 2026-09-18 删除，连同执行体里的 `handle-dispatch` 动词**（market-spec 03 §4.7 第 5 步）。
+删之前先等了一件事，而且那个顺序不能反：`release` 事件跑的是 **tag 所指提交**上的 workflow 文件，
+而 `_incoming` 的 tag 引用要等 `cleanIncoming` 把旧引用删掉、下一次 Publish 才在当时的默认分支 HEAD
+上重建。**确认引用确实被删过**（`git/ref/tags/_incoming` 回到 404）之后，旧提交上那份 `forward.yml`
+才真的不可能再被解析到 —— 那时这条监听才失去了存在的理由。
 
-⚠️ **这条约束只对 `on-dispatch.yml` 成立。** `spike-fdroid-repo.yml` 曾经也在第 5 步那一格里，
-**已于 2026-09-18 单独删掉** —— 它不写 `store`、不握任何 PAT、不进 `store-write` 队列，与灰度顺序
-**零耦合**，删它不需要等任何东西（它留下的证据在 `market-spec/spike/FDROID-REPO-REFS.md` §3.1）。
+⚠️ **那条顺序约束从头到尾只对 `on-dispatch.yml` 成立，`spike-fdroid-repo.yml` 不受它管。**
+后者曾经也在第 5 步那一格里，**已于 2026-09-18 单独删掉**（远早于拆工作流收尾）—— 它不写 `store`、
+不握任何 PAT、不进 `store-write` 队列，与灰度顺序**零耦合**，删它不需要等任何东西
+（它留下的证据在 `market-spec/spike/FDROID-REPO-REFS.md` §3.1）。
 
 从前的 `rebuild-index.yml`（手动跑的"账本灾难恢复"）也删掉了（D56）：账本是
 派生数据，而它唯一的自动恢复途径本来就在日常路径上 —— 账本里没有 `upstreamTag` 的
