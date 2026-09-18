@@ -1,0 +1,120 @@
+name: fetch-executor
+description: >-
+  掩码 PAT、恢复跨轮 APK cache、从 forge-core 的 Release 浮动取最新执行体并补执行位；
+  最后把执行体路径导出成 `FORGE_EXEC`、把 cache 目录导出成 `APK_CACHE_DIR`。
+
+# 为什么是 composite action：这一段从前逐字出现在 on-dispatch.yml 与 reconcile.yml
+# 两个文件里，而它里面埋着**两处必须一致、错了却是静默失败**的东西 ——
+# 一个是 `EXEC_ASSET` 的名字（asset 名，改一处忘一处就是"下载成功但这个文件不存在"），
+# 另一个是 cache 的 key 前缀与目录（两个写入口共用一盘 cache，key 对不上就是索引
+# 悄悄缩小，见下）。抽成一处之后，调用方只认 `$FORGE_EXEC`，那两个常量只在这里存在。
+#
+# ⚠️ 它**不做** APK cache 之外的事，也不负责 checkout：这条流水线**不 checkout 任何东西**，
+# 没有源码要取（store 是二进制自己浅克隆的，STORE_DIR 留空）。
+#
+# ⚠️ **PAT 会经过第三方代码。** 取件用的是 `robinraju/release-downloader`，
+# PAT 是作为 `with.token` 交给它的。这是换件的代价，记在 README 的「执行体从哪来」
+# 与 03 §4.5 第 11 条（"第三方 action 只许出现在不握 PAT 的 job 里"那条要按这个事实
+# 重新表述 —— beacon 这个复合 action 恰好**要**吃 PAT，两者不再互斥）。
+inputs:
+  token:
+    description: 细粒度 PAT。forge-core 是私有仓库，GITHUB_TOKEN 跨不了仓库（§6.2 不变量 1），所以这里**不能**吃默认值。
+    required: true
+  asset-name:
+    description: >-
+      forge-core Release 里那个 asset 的名字。它**同时**就是落盘后的本地文件名，
+      所以"下载用的名字"与"执行用的路径"必须是同一个值 —— 做成一个 input 而不是
+      两处字面量，正是为了让它们不可能对不上。调用方不需要传（它从不改变，
+      而"能改的值"就是"会被改错的值"）。
+    required: false
+    default: forge-linux-amd64
+runs:
+  using: composite
+  steps:
+    # ⚠️ 掩码**必须先于**它要覆盖的输出。`::add-mask::` 是 job 级生效的：本步注册之后，
+    # 余下所有 step 的日志 —— **包括下面那个第三方 action 自己打的** —— 都会被遮蔽。
+    # 换成 action 之后我们没法再在它的 `run:` 里发这一句（它没有 run:），所以它必须是
+    # 本复合动作的第一步，而不是"和取件放一起"。
+    #
+    # 顺带把 cache 目录导出去（下面那个 cache 步骤用的是同一个字面量，两处必须一致 ——
+    # 这里只有一处文件，改的时候看得见）。写成 $GITHUB_ENV 是因为**调用方的 run: 步骤
+    # 要拿它报一句现场证据**："这一轮 cache 里有几个 APK"直接决定索引里有没有老版本，
+    # 而它出问题时的症状是"某个应用的旧版本在某天之后就不见了"。
+    - name: Mask the token and export the cache dir
+      shell: bash
+      env:
+        MASK: ${{ inputs.token }}
+        CACHE_DIR: ${{ github.workspace }}/apk-cache
+      run: |
+        set -euo pipefail
+        echo "::add-mask::$MASK"
+        echo "APK_CACHE_DIR=$CACHE_DIR" >> "$GITHUB_ENV"
+
+    # ⚠️ **两个写入口共用这一盘 cache、这一个 key 前缀**（`fdroid-apks-v1-`）。
+    # 最容易想错的地方是"事件处理不碰索引，不需要 cache" —— 它碰：一条
+    # `intake-incoming` 就是一个应用的新版本进索引，而索引里**其余**老版本的 APK
+    # 得在这一轮里凑齐，凑不齐它们就从索引里消失（"只下最新版、老版本只从 cache 取"，
+    # 见 03 §5.1）。少了 cache，一次搬运会把整个索引**缩小**到只剩最新版，然后推出去。
+    #
+    # ⚠️ **key 必须是滚动 key**：`fdroid-apks-v1-<run_id>` 每轮都不一样，于是每轮都会
+    # **存一份新的**，而 `restore-keys` 的前缀匹配取回最近那一份 —— 老 APK 因此一轮一轮
+    # 累积下来。这正是「索引随时间变长」要的形态。
+    #
+    # ⚠️ **绝不能** key 在 `hashFiles('sources/**')` 上 —— 那样每次改一个来源整个 cache
+    # 就失效、老版本全丢，用户要的"累积保留"直接不成立。这条推论值得记住：
+    # **这个 cache 的正确性判据是"命中旧 key 仍然有用"**，而普通依赖缓存的判据是
+    # "内容没变才该命中" —— 两者的 key 策略正好相反。
+    #
+    # ⚠️ 已知的边界（不阻断，但要知道）：GitHub 的 cache 在**仓库 10 GB** 或
+    # **7 天未被使用**时被回收。两条都离我们很远 —— 每天一轮 ⇒ 天天在刷新，而一轮
+    # 几十 MB ⇒ 撞 10 GB 要很久。真撞上了，症状是"老版本开始从索引里消失"，不是报错。
+    #
+    # ⚠️ 另一条更近的边界：这个 action 的 `post-if` 是 `success()`，所以**本 job 只要有
+    # 任何一个 step 失败，这一轮的 cache 就不会存**（下次跑仍然命中上一轮那份，不会有
+    # 正确性问题，只是那一轮新下的要重下）。症状是"每次红完的下一轮都特别慢"——
+    # 看见这个别去查网络。
+    #
+    # ⚠️ 目录必须在 store 克隆**之外**：克隆每轮都被删，放进去等于没放。二进制只认
+    # 环境变量，不关心它指向哪儿（见 internal/job/repo.go 的 ensureLocal）。
+    - name: Restore the APK cache
+      uses: actions/cache@v6
+      with:
+        path: ${{ github.workspace }}/apk-cache
+        key: fdroid-apks-v1-${{ github.run_id }}
+        restore-keys: |
+          fdroid-apks-v1-
+
+    # 取执行体：从 forge-core 的 Release 拿**最新**的二进制（不钉 tag）。
+    #
+    # ⚠️ 这个二进制是**带着能写 store 的 PAT 执行的**，所以 forge-core 那边
+    # "打 tag = 上生产"。浮动取 latest 是刻意的：改完代码打个 tag，本仓库一个字都不用动，
+    # 下一轮就换新版。也正因如此，**删掉一个动词之前必须先让新二进制发出去** ——
+    # 浮动取件意味着旧 workflow 下一轮就会用上刚发布的新二进制。
+    - name: Fetch executor
+      uses: robinraju/release-downloader@v1
+      with:
+        repository: market-of-labs/forge-core
+        # 不钉 tag = **浮动取 latest**（刻意的，见上面的理由）。
+        latest: true
+        fileName: ${{ inputs.asset-name }}
+        # 只能是 $GITHUB_WORKSPACE 下的相对路径。本 job 没有 checkout，但那个目录
+        # runner 已经建好了 —— 空着，正好放一个二进制。
+        out-file-path: .
+        # ⚠️ 不能吃默认值（默认是 `github.token`）：forge-core 是私有仓库，
+        # GITHUB_TOKEN 跨不了仓库（§6.2 不变量 1）。
+        token: ${{ inputs.token }}
+
+    # Release asset 不带执行位，得自己补。路径落在 $GITHUB_WORKSPACE 而不是
+    # $RUNNER_TEMP —— 上面那个 action 只往工作目录里放东西。
+    #
+    # 导出的 `FORGE_EXEC` 是这一段抽出来的**主要收益**：从前调用方的 `run:` 里写的是
+    # `"$GITHUB_WORKSPACE/$EXEC_ASSET"`，于是"改 asset 名要同时改两处"（job env 与
+    # `with.fileName`）成了一条只能靠注释维持的约定。现在调用方只认这一个变量。
+    - name: Make executable
+      shell: bash
+      env:
+        EXEC_ASSET: ${{ inputs.asset-name }}
+      run: |
+        set -euo pipefail
+        chmod +x "$GITHUB_WORKSPACE/$EXEC_ASSET"
+        echo "FORGE_EXEC=$GITHUB_WORKSPACE/$EXEC_ASSET" >> "$GITHUB_ENV"

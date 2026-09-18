@@ -2,11 +2,17 @@ version: 2
 
 # 三个仓库需要这个文件（依赖在哪，升级就该配在哪）：
 #   - `forge-core`：build.yml 的三个 action + go.mod；
-#   - `store`：forward.yml 的 `actions/github-script`；
-#   - 本仓库（`forge`）：取执行体那个 action（`robinraju/release-downloader@v1`）。
+#   - `store`：beacon 复合动作里的 `actions/github-script`（它自己那一份在
+#     store/.github/dependabot.yml）；
+#   - 本仓库（`forge`）：`fetch-executor` 复合动作里的两个 —— `actions/cache@v6`
+#     与 `robinraju/release-downloader@v1`（拆工作流之前它们散在三个 workflow 里、
+#     逐字重复，现在只有这一处）。⚠️ `on-dispatch.yml` 里那份逐字重复的同类步骤不算
+#     —— 它属灰度的最后一步、要删掉的（market-spec 03 §4.7 第 5 步）。
+#     （`spike-fdroid-repo.yml` 里那个 `actions/upload-artifact@v7` 曾经也在，
+#     该文件已于 2026-09-18 删除。）
 #
-# 本仓库只有**一个**依赖，但正因为它用的是主版本标签（`@v1`），不配这个就等于钉死
-# 在当前主版本上 —— 而这个 action 跑的 job 握着能跨四个仓库的 PAT（03 §4.5 第 11
+# 本仓库只有**两个**依赖，但正因为它们用的是主版本标签（`@v6` / `@v1`），不配这个就等于
+# 钉死在当前主版本上 —— 而这两个 action 跑的 job 握着能跨四个仓库的 PAT（03 §4.5 第 11
 # 条的例外），让它停在旧主版本上是这里最不该省的一道自动。
 #
 # 不花 Actions 分钟数：本仓库的 workflow 只由 `repository_dispatch` / `schedule` /
@@ -17,7 +23,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    # 只有一个依赖，合成一个 PR，别刷屏。
+    # 只有两个依赖，合成一个 PR，别刷屏。
     groups:
       actions:
         patterns: ['*']

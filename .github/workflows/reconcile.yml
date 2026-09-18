@@ -1,9 +1,19 @@
-name: reconcile
+name: 全量对账
 
-# 触发面白名单（03 §4.2）：schedule 只有 GitHub 能发起，workflow_dispatch 要仓库写权限。
-# 两者都不依赖任何外部输入，所以这个 workflow 的输入面是**空的** ——
-# 它不会因为某个陌生人做了什么而跑起来。
+# **这个文件就是一个功能。** 它干的事只有一件：让 store 与上游重新对一遍
+# （03 §4.4）—— 解析上游 → 镜像缺失版本 → 重建索引 → 回写。
+#
+# 文件名即路由：看懂它要干什么不需要读任何 `if:` 或 Go 里的 switch。
+#
+# 触发面白名单（03 §4.2）：schedule 只有 GitHub 能发起，workflow_dispatch 要仓库写权限，
+# repository_dispatch 要 PAT。三者都不依赖任何外部输入，所以这个 workflow 的输入面
+# 是**空的** —— 它不会因为某个陌生人做了什么而跑起来，而"跑哪一件事"也不是一个
+# 输入（这个文件只有一件事）。
 on:
+  repository_dispatch:
+    # ⚠️ `types:` 就是路由，只认这一个词 —— 别的事件打进来不会启动本文件。
+    # 它的来源是 store 侧的同名手动按钮（人改完 sources/ 之后想让改动生效）。
+    types: [reconcile]
   schedule:
     # 每天**北京 02:17**（= 前一天 18:17 UTC）。⚠️ GitHub 的 cron 只认 UTC，且不认时区 ——
     # 所以这里写的是 UTC 值，换算成北京（UTC+8，无夏令时）要 **减 8 小时**。
@@ -23,8 +33,8 @@ on:
 # ⚠️ `actions/cache` 不吃这个字段 —— 它用的是 runtime token，与 GITHUB_TOKEN 无关。
 permissions: {}
 
-# 与 on-dispatch.yml 同名同组：这两个 workflow 是 store 的两个写入口，
-# 共用一条队列就不会互相踩（GitHub 的并发组是**仓库级**的，跨 workflow 文件生效）。
+# 与 intake-incoming.yml / source-change.yml 同名同组：这三个 workflow 都是 store 的
+# 写入口，共用一条队列就不会互相踩（GitHub 的并发组是**仓库级**的，跨 workflow 文件生效）。
 concurrency:
   group: store-write
   cancel-in-progress: false
@@ -43,7 +53,9 @@ jobs:
       image: debian:trixie
     # ⚠️ 容器 job 的默认 shell 是 **sh（dash）**，不是 bash —— Debian 基础镜像里
     # 根本没有 bash。少了这一段，任何用 bash 语法的 step 都会以 `…: not found`
-    # + exit 127 收场，而且报错行号指向函数体、看起来毫无线索（实测于 spike）。
+    # + exit 127 收场，而且报错行号指向函数体、看起来毫无线索（实测于 spike —— 那个
+    # workflow 已于 2026-09-18 删除，证据与复现步骤见 market-spec/spike/FDROID-REPO-REFS.md；
+    # 下文提到 spike 处同）。
     defaults:
       run:
         shell: bash
@@ -52,130 +64,56 @@ jobs:
     # 从 90 放宽到 120 的理由就是这个"随时间变长"，而不是"首轮慢"：
     # 首轮只是要下 12 个最新版本，那点流量比 androguard 解析 20 个 APK 便宜得多。
     timeout-minutes: 120
-    env:
-      # 上游 asset 名。写死，不走变量 —— 它从不改变，而"能改的值"就是"会被改错
-      # 的值"。action 按 **asset 原名**落盘，所以它同时就是本地文件名。
-      # ⚠️ 改这里要同时改 `Fetch executor` 的 `with.fileName`（两处必须一致）。
-      EXEC_ASSET: forge-linux-amd64
-
-      # 跨轮持久的 APK cache —— 「索引里保留已下载的老版本」这条需求的**前提**，
-      # 不是优化。CI 里每轮 store 都是全新浅克隆（`Ctx.Open` 用 `os.MkdirTemp`、
-      # `Close` 时删），没有这个目录，老版本每轮都得重新下载，而"只下最新版"那条
-      # 规则会让它们**永远进不了索引**（见 03 §5.1）。
-      #
-      # ⚠️ 必须在 store 克隆**之外**：克隆每轮都被删，放进去等于没放。
-      # 二进制只认这个环境变量，不关心它指向哪儿（见 internal/job/repo.go 的 ensureLocal）。
-      APK_CACHE_DIR: ${{ github.workspace }}/apk-cache
+    # ⚠️ 这里从前有一个 job 级 `env:`，装着两个变量（`EXEC_ASSET` 与 `APK_CACHE_DIR`）
+    # —— 两个都改由下面的 `取执行体` 复合动作导出：前者成了调用方读的 `$FORGE_EXEC`，
+    # 后者进了 `$GITHUB_ENV` 供 `reconcile` 那一步报现场证据用。
+    #
+    # 于是"改 asset 名要同时改两处（job env 与 action 的 with.fileName）"那条只能靠
+    # 注释维持的约定**不存在了** —— 它现在只有一个字面量，就在那个动作里。
+    #
+    # ⚠️ 顺带记一条仍然成立的前提：cache 目录必须在 store 克隆**之外**（克隆每轮都被
+    # 删，放进去等于没放）。这条理由现在写在那个动作里。
     steps:
-      # 这条流水线要的四样外部工具，缺一样都跑不起来：
+      # 工具链与取件这两件事从前逐字写在这个文件与 on-dispatch.yml 两处，现在各自
+      # 是一个复合动作 —— 那两份拷贝里最要紧的一条是 apt 清单（少一个 git 的症状是
+      # "配置都对，却连第一句 clone 都跑不起来"），逐条理由见 .github/actions/setup-fdroid。
       #
-      #   fdroidserver      —— 生成索引与签名（本 job 的主角）
-      #   default-jdk-headless —— 提供 `jarsigner`，它是 JAR 签名的唯一实现路径；
-      #                        装了它就不必自己实现 PKCS#7
-      #   bash              —— 给上面那个 `defaults:` 用的，**不是**可有可无的包
-      #   nodejs            —— 给两个 JS action 用的（`robinraju/release-downloader`
-      #                        与 `actions/cache`）。⚠️ 这一条是**照着"容器里得有
-      #                        node"装的，但那个前提从来没被单独验证过** ——
-      #                        三个 action 都声明 `using: node24`，而 trixie 的
-      #                        nodejs 是 **20.19.2**。既然 spike 里 `upload-artifact@v7`
-      #                        （同样是 node24）在同一个容器里跑过了，真正被用的多半是
-      #                        runner 自己带进来的那个 node，容器这个只是备着。
-      #                        留着它的理由不是"确定需要"，而是**多装一个 node 无害，
-      #                        猜错却是整条红** —— 这种账在本仓一律往保守的一边算。
-      #   git               —— ⚠️ **二进制自己要用**：它靠 `internal/gitx` 调 git
-      #                        浅克隆 store、再推送回写。Debian 基础镜像里没有 git，
-      #                        漏了它的症状是"配置都对的，却连第一句 clone 都跑不起来"
-      #   unzip / jq / curl / ca-certificates —— 断言步骤与 HTTPS 取件
+      # ⚠️ **引用写的是 `$/` 而不是 `./`** —— 这不是笔误，三个入口文件都必须这样写：
       #
-      # 容器里就是 root，不需要 sudo。
-      - name: Install the toolchain
-        run: |
-          set -euo pipefail
-          apt-get update -qq
-          apt-get install -y -qq --no-install-recommends \
-            fdroidserver default-jdk-headless bash nodejs git \
-            unzip jq curl ca-certificates
-
-          # 把版本钉进 summary：fdroidserver / androguard 的行为**随版本变**
-          # （上面那个必须用 trixie 的理由就是一次版本差异），结论要能对应到
-          # 具体版本才有意义。哪天这条流水线莫名其妙红了，先看这里有没有变。
-          {
-            echo "### 环境"
-            echo
-            echo '| 工具 | 输出 |'
-            echo '|---|---|'
-            echo "| \`fdroid\` | $(fdroid --version 2>&1 | head -1) |"
-            echo "| \`androguard\`(dpkg) | $(dpkg-query -W -f='${Version}' python3-androguard 2>/dev/null || echo '未知') |"
-            echo "| \`jarsigner\` | \`$(command -v jarsigner || echo '**不在 PATH**')\` |"
-            echo "| \`java\` | $(java -version 2>&1 | head -1) |"
-            echo "| \`git\` | $(git --version 2>&1) |"
-            echo "| \`node\` | $(node --version 2>&1 | head -1) |"
-            echo "| \`python3\` | $(python3 --version 2>&1) |"
-            echo
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # ⚠️ 掩码必须先发，且只能拆成独立一步：二进制自己那句 `::add-mask::` 只覆盖
-      # 它**之后**的输出，而换成 action 之后，我们又没有它的 `run:` 可以写这一句。
-      # `::add-mask::` 是 job 级生效的，所以放在 action **之前**仍然覆盖 action
-      # 自己打的东西。
+      #   `./.github/actions/x` 是**工作区相对路径**，要求先 `actions/checkout` 把仓库
+      #   落到工作区里（少了它报 `Can't find 'action.yml' … Did you forget to run
+      #   actions/checkout?`）。而本 job 跑在 debian:trixie 里，**那个镜像里没有 git**
+      #   —— 装 git 的那一步恰好就是我们要复用的这个动作，于是"先 checkout 才能装
+      #   git、先装 git 才能 checkout"闭环。更根本的是：这条流水线的设计前提就是
+      #   **不 checkout 任何东西**（store 是二进制自己浅克隆的），为了一句 `uses:`
+      #   把整个仓库拉进执行环境是反的。
       #
-      # 这里只掩 PAT：另外两个秘密（keystore 口令）由二进制启动时的
-      # `Env.AddMask()` 一起掩掉，而且它们**从不经过本 workflow 的任何命令**
+      #   `$/.github/actions/x` 是 GitHub 2026-07-30 加的**自仓库语法**：解析到**本
+      #   workflow 所属仓库、当前正在跑的那个 commit**，且**不需要 checkout**。
+      #   限制：仅 github.com、需要 runner ≥ 2.336.0（托管 runner 满足）、GitHub
+      #   Enterprise Server 上没有。
+      #
+      # ⚠️ 顺序不能换：掩码是 `取执行体` 的第一步，而它必须**先于**任何会打日志的东西
+      # （`::add-mask::` 是 job 级生效的，注册之后余下所有 step 的输出 —— 包括那个
+      # 第三方 action 自己打的 —— 都会被遮蔽）。
+      #
+      # ⚠️ 这里只掩 PAT：另外两个秘密（keystore 口令）由二进制启动时的 `Env.AddMask()`
+      # 一起掩掉，而且它们**从不经过本 workflow 的任何命令**
       # （见下面「keystore 为什么没有独立步骤」）。
-      - name: Mask token
-        env:
-          MASK: ${{ secrets.GH_PAT }}
-        run: echo "::add-mask::$MASK"
+      - name: 装工具链
+        uses: $/.github/actions/setup-fdroid
 
-      # ⚠️ **key 必须是滚动 key**：`fdroid-apks-v1-<run_id>` 每轮都不一样，
-      # 于是每轮都会**存一份新的**，而 `restore-keys` 的前缀匹配取回最近那一份 ——
-      # 老 APK 因此一轮一轮累积下来。这正是「索引随时间变长」要的形态。
+      # 取执行体：从 forge-core 的 Release 拿**最新**的二进制（不钉 tag），顺带恢复那盘
+      # 跨轮 APK cache 并导出 `FORGE_EXEC` / `APK_CACHE_DIR`。理由（浮动取 latest、
+      # 为什么滚动 key、为什么 cache 目录必须在 store 克隆之外）都写在那个动作里。
       #
-      # ⚠️ **绝不能** key 在 `hashFiles('sources/**')` 上 —— 那样每次改一个来源
-      # 整个 cache 就失效、老版本全丢，用户要的"累积保留"直接不成立。
-      # 这条推论值得记住：**这个 cache 的正确性判据是"命中旧 key 仍然有用"**，
-      # 而普通依赖缓存的判据是"内容没变才该命中" —— 两者的 key 策略正好相反。
-      #
-      # ⚠️ 已知的边界（不阻断，但要知道）：GitHub 的 cache 在**仓库 10 GB** 或
-      # **7 天未被使用**时被回收。两条都离我们很远 —— 每天一轮 ⇒ 天天在刷新，
-      # 而一轮几十 MB ⇒ 撞 10 GB 要很久。真撞上了，症状是"老版本开始从索引里
-      # 消失"，不是报错。
-      #
-      # ⚠️ 另一条更近的边界：这个 action 的 `post-if` 是 `success()`，
-      # 所以**本 job 只要有任何一个 step 失败，这一轮的 cache 就不会存**
-      # （下次跑仍然命中上一轮那份，不会有正确性问题，只是那一轮新下的要重下）。
-      # 症状是"每次红完的下一轮都特别慢"—— 看见这个别去查网络。
-      - name: Restore the APK cache
-        uses: actions/cache@v6
+      # ⚠️ 浮动取 latest 有一条要紧的推论：**改完代码打个 tag，本仓库一个字都不用动，
+      # 下一轮就换新版** —— 所以"删掉一个动词"必须先让新二进制发出去，否则旧 workflow
+      # 下一轮就会用上刚发布的新二进制，直接红。
+      - name: 取执行体
+        uses: $/.github/actions/fetch-executor
         with:
-          path: ${{ env.APK_CACHE_DIR }}
-          key: fdroid-apks-v1-${{ github.run_id }}
-          restore-keys: |
-            fdroid-apks-v1-
-
-      # 取执行体：从 forge-core 的 Release 拿**最新**的二进制（不钉 tag）。
-      #
-      # ⚠️ 这个二进制是**带着能写 store 的 PAT 执行的**，所以 forge-core 那边
-      # "打 tag = 上生产"。浮动取 latest 是刻意的：改完代码打个 tag，本仓库
-      # 一个字都不用动，下一轮对账就换新版。
-      - name: Fetch executor
-        uses: robinraju/release-downloader@v1
-        with:
-          repository: market-of-labs/forge-core
-          # 不钉 tag = **浮动取 latest**（刻意的，见上面的理由）。
-          latest: true
-          fileName: forge-linux-amd64
-          # 只能是 $GITHUB_WORKSPACE 下的相对路径。本 job 没有 checkout，但那个
-          # 目录 runner 已经建好了 —— 空着，正好放一个二进制。
-          out-file-path: .
-          # ⚠️ 不能吃默认值（默认是 `github.token`）：forge-core 是私有仓库，
-          # GITHUB_TOKEN 跨不了仓库（§6.2 不变量 1）。
           token: ${{ secrets.GH_PAT }}
-
-      - name: Make executable
-        # Release asset 不带执行位，得自己补。路径落在 $GITHUB_WORKSPACE 而不是
-        # 原来的 $RUNNER_TEMP —— 这个 action 只往工作目录里放东西。
-        run: chmod +x "$GITHUB_WORKSPACE/$EXEC_ASSET"
 
       # 一条命令跑完 §4.4 的四步：解析上游 → 镜像缺失版本 → 重建 index（自检就在
       # 这一步里）→ 回写。**刻意不拆成多个 step**：拆开的话，中间某一步失败会留下
@@ -204,7 +142,7 @@ jobs:
           REPO_KEY_PASS: ${{ secrets.REPO_KEY_PASS }}
         run: |
           set -euo pipefail
-          # 这里**不再**掩码：上面那个 `Mask token` 步骤已经 job 级生效（同一把 PAT），
+          # 这里**不再**掩码：`取执行体` 的第一步已经 job 级生效（同一把 PAT），
           # 而二进制启动后第一件事也是 env.AddMask()。再掩一次是纯重复。
 
           # 先报一句 cache 的现状。这一行是**"保留老版本"这条需求唯一的现场证据**：
@@ -213,7 +151,9 @@ jobs:
           mkdir -p "$APK_CACHE_DIR"
           echo "cache 目录 $APK_CACHE_DIR 里有 $(find "$APK_CACHE_DIR" -name '*.apk' | wc -l) 个 APK"
 
-          "$GITHUB_WORKSPACE/$EXEC_ASSET" reconcile
+          # 路径来自取件那个复合动作导出的 `FORGE_EXEC`（见那里的说明）——
+          # 这里不再拼 `$GITHUB_WORKSPACE/$EXEC_ASSET`，那个 job 级 env 已经删了。
+          "$FORGE_EXEC" reconcile
 
       # 这一条**只看一个东西**：**已经发布出去**的那份索引，是不是用我们那把
       # 谁都认识不了的 key 之外的东西签的。
