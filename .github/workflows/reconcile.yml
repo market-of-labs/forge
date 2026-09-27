@@ -1,0 +1,379 @@
+name: 全量对账
+
+# **这个文件就是一个功能。** 它干的事只有一件：让 store 与上游重新对一遍
+# （03 §4.4）—— 解析上游 → 镜像缺失版本 → 重建索引 → 回写。
+#
+# 文件名即路由：看懂它要干什么不需要读任何 `if:` 或 Go 里的 switch。
+#
+# 触发面白名单（03 §4.2）：schedule 只有 GitHub 能发起，workflow_dispatch 要仓库写权限，
+# repository_dispatch 要 PAT。三者都不依赖任何外部输入，所以这个 workflow 的输入面
+# 是**空的** —— 它不会因为某个陌生人做了什么而跑起来，而"跑哪一件事"也不是一个
+# 输入（这个文件只有一件事）。
+on:
+  repository_dispatch:
+    # ⚠️ `types:` 就是路由，只认这一个词 —— 别的事件打进来不会启动本文件。
+    #
+    # ⚠️ **这一面目前没有发送方**（2026-09-18）：store 侧那个只做转发的 `reconcile.yml`
+    # 已删除（D66），于是本文件成了对账**唯一**的入口 —— 每天的 cron 与手动按钮都在
+    # 下面这一段里，"今天跑了几次对账"只在一个仓库里数得清。
+    #
+    # ⚠️ **但它有意留着，别顺手删掉。** 撤掉一个已经发出去的 `types:` 是不可逆的：
+    # 撤了之后外部脚本（或某个 bookmarklet）再发这个词，GitHub 返回 **204 且什么都
+    # 不做** —— 没有报错、没有日志、Actions 页面干干净净（03 §4.2）。留着的代价为零
+    # （没有任何东西会发它），恢复的成本是一次静默失败。
+    types: [reconcile]
+  schedule:
+    # 每天**北京 02:17**（= 前一天 18:17 UTC）。⚠️ GitHub 的 cron 只认 UTC，且不认时区 ——
+    # 所以这里写的是 UTC 值，换算成北京（UTC+8，无夏令时）要 **减 8 小时**。
+    # 目标窗口是北京凌晨 2–6 点：定在窗口**开头**是因为整轮的超时预算（见下面的
+    # timeout-minutes），从开头起跑才留得下余量 —— 定在 05:xx 的话，一次慢轮次或
+    # runner 排队就会把它推出窗口。
+    #
+    # 用非整点分钟（`17` 而不是 `0`）避开全网同时打 GitHub API ——
+    # 整点是最拥挤的时刻，而 runner 排队与上游限流都吃这个亏。
+    - cron: '17 18 * * *'
+  workflow_dispatch:
+
+# 本仓库现在**只有 workflow，没有任何源码**（Go 源码与构建在私有的
+# `market-of-labs/forge-core`）。所以这里不需要任何 GITHUB_TOKEN 权限：
+# 执行体走 PAT 从 forge-core 拉，写 store 也走同一把 PAT（§6.2 不变量 1）。
+#
+# ⚠️ `actions/cache` 不吃这个字段 —— 它用的是 runtime token，与 GITHUB_TOKEN 无关。
+permissions: {}
+
+# 与 intake-incoming.yml / source-change.yml 同名同组：这三个 workflow 都是 store 的
+# 写入口，共用一条队列就不会互相踩（GitHub 的并发组是**仓库级**的，跨 workflow 文件生效）。
+concurrency:
+  group: store-write
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    # ⚠️ **必须是 Debian 容器**，理由有实测背书（见 README「为什么在容器里跑」）：
+    # ubuntu-latest 自带的 `fdroidserver 2.2.1` 带着 `androguard 3.4.0~a1-6`，它解析
+    # 现代 APK（Flutter + 新 AGP）的 `resources.arsc` 时会 `raise ResParserError`；
+    # 同一个文件在 trixie 的 `3.4.0~a1-17` 已改成 `log.warning`。**别改回 ubuntu-latest。**
+    #
+    # trixie 现在是 Debian stable，所以这一行是**可复现**的；等它变成 oldstable
+    # 之后要再评估一次（那时 `debian:forky` 才是新的 stable）。
+    container:
+      image: debian:trixie
+    # ⚠️ 容器 job 的默认 shell 是 **sh（dash）**，不是 bash —— Debian 基础镜像里
+    # 根本没有 bash。少了这一段，任何用 bash 语法的 step 都会以 `…: not found`
+    # + exit 127 收场，而且报错行号指向函数体、看起来毫无线索（实测于 spike —— 那个
+    # workflow 已于 2026-09-18 删除，证据与复现步骤见 market-spec/spike/FDROID-REPO-REFS.md；
+    # 下文提到 spike 处同）。
+    defaults:
+      run:
+        shell: bash
+    # 对账要遍历所有上游、下载缺失的 APK，再让 fdroidserver **逐个解析** repo/ 下
+    # 已经攒起来的每一个 APK —— 所以这一轮的耗时随索引增长而增长，不是常量。
+    # 从 90 放宽到 120 的理由就是这个"随时间变长"，而不是"首轮慢"：
+    # 首轮只是要下 12 个最新版本，那点流量比 androguard 解析 20 个 APK 便宜得多。
+    timeout-minutes: 120
+    # ⚠️ 这里从前有一个 job 级 `env:`，装着两个变量（`EXEC_ASSET` 与 `APK_CACHE_DIR`）
+    # —— 两个都改由下面的 `取执行体` 复合动作导出：前者成了调用方读的 `$FORGE_EXEC`，
+    # 后者进了 `$GITHUB_ENV` 供 `reconcile` 那一步报现场证据用。
+    #
+    # 于是"改 asset 名要同时改两处（job env 与 action 的 with.fileName）"那条只能靠
+    # 注释维持的约定**不存在了** —— 它现在只有一个字面量，就在那个动作里。
+    #
+    # ⚠️ 顺带记一条仍然成立的前提：cache 目录必须在 store 克隆**之外**（克隆每轮都被
+    # 删，放进去等于没放）。这条理由现在写在那个动作里。
+    steps:
+      # 工具链与取件这两件事从前逐字写在这个文件与 on-dispatch.yml 两处，现在各自
+      # 是一个复合动作 —— 那两份拷贝里最要紧的一条是 apt 清单（少一个 git 的症状是
+      # "配置都对，却连第一句 clone 都跑不起来"），逐条理由见 .github/actions/setup-fdroid。
+      #
+      # ⚠️ **引用写的是 `$/` 而不是 `./`** —— 这不是笔误，三个入口文件都必须这样写：
+      #
+      #   `./.github/actions/x` 是**工作区相对路径**，要求先 `actions/checkout` 把仓库
+      #   落到工作区里（少了它报 `Can't find 'action.yml' … Did you forget to run
+      #   actions/checkout?`）。而本 job 跑在 debian:trixie 里，**那个镜像里没有 git**
+      #   —— 装 git 的那一步恰好就是我们要复用的这个动作，于是"先 checkout 才能装
+      #   git、先装 git 才能 checkout"闭环。更根本的是：这条流水线的设计前提就是
+      #   **不 checkout 任何东西**（store 是二进制自己浅克隆的），为了一句 `uses:`
+      #   把整个仓库拉进执行环境是反的。
+      #
+      #   `$/.github/actions/x` 是 GitHub 2026-07-30 加的**自仓库语法**：解析到**本
+      #   workflow 所属仓库、当前正在跑的那个 commit**，且**不需要 checkout**。
+      #   限制：仅 github.com、需要 runner ≥ 2.336.0（托管 runner 满足）、GitHub
+      #   Enterprise Server 上没有。
+      #
+      # ⚠️ 顺序不能换：掩码是 `取执行体` 的第一步，而它必须**先于**任何会打日志的东西
+      # （`::add-mask::` 是 job 级生效的，注册之后余下所有 step 的输出 —— 包括那个
+      # 第三方 action 自己打的 —— 都会被遮蔽）。
+      #
+      # ⚠️ 这里只掩 PAT：另外两个秘密（keystore 口令）由二进制启动时的 `Env.AddMask()`
+      # 一起掩掉，而且它们**从不经过本 workflow 的任何命令**
+      # （见下面「keystore 为什么没有独立步骤」）。
+      - name: 装工具链
+        uses: $/.github/actions/setup-fdroid
+
+      # 取执行体：从 forge-core 的 Release 拿**最新**的二进制（不钉 tag），顺带恢复那盘
+      # 跨轮 APK cache 并导出 `FORGE_EXEC` / `APK_CACHE_DIR`。理由（浮动取 latest、
+      # 为什么滚动 key、为什么 cache 目录必须在 store 克隆之外）都写在那个动作里。
+      #
+      # ⚠️ 浮动取 latest 有一条要紧的推论：**改完代码打个 tag，本仓库一个字都不用动，
+      # 下一轮就换新版** —— 所以"删掉一个动词"必须先让新二进制发出去，否则旧 workflow
+      # 下一轮就会用上刚发布的新二进制，直接红。
+      - name: 取执行体
+        uses: $/.github/actions/fetch-executor
+        with:
+          token: ${{ secrets.GH_PAT }}
+
+      # 一条命令跑完 §4.4 的四步：解析上游 → 镜像缺失版本 → 重建 index（自检就在
+      # 这一步里）→ 回写。**刻意不拆成多个 step**：拆开的话，中间某一步失败会留下
+      # "镜像完了但索引没重建"的状态并让 workflow 变红，而实际上下一轮对账
+      # 会把没做完的部分自然补上（§4.4 的幂等自愈）。
+      #
+      # 注意"单个应用镜像失败"是**被容忍**的（D44）：它记一条 ERROR、跳过那个应用、
+      # 这一轮照常重建并回写，所以这一轮仍然是绿的 —— 判据是下面摘要行里的 `失败 z`。
+      # 拆成多个 step 会把这个刻意设计的容忍重新变成一个红色中断。
+      #
+      # 自检不过时二进制**在回写之前**就停下并返回非零（§5.3），
+      # 所以变红 = 真的有问题，不会出现"红着但东西已经推上去了"。
+      # ⚠️ 反过来不成立：**绿不保证没问题** —— 被容忍的镜像失败就是绿的（上一段）。
+      #
+      # ⚠️ **keystore 为什么没有独立步骤**：它是二进制自己从 `REPO_KEYSTORE_B64`
+      # 解到 `os.CreateTemp("", "repo-signing-*.jks")`（即 `/tmp`，0600，
+      # 且**在 store 克隆之外**），config.yml 里引用那个绝对路径（见 internal/job/repo.go
+      # 的 writeFdroidConfig）。在 workflow 里再解一遍是**纯重复**，而且会让明文
+      # 私钥多经过一个 shell。三个 secret 只作为环境变量交给二进制，一个字节都不落盘。
+      - name: Reconcile
+        id: run
+        env:
+          STORE_TOKEN: ${{ secrets.GH_PAT }}
+          REPO_KEYSTORE_B64: ${{ secrets.REPO_KEYSTORE_B64 }}
+          REPO_KEYSTORE_PASS: ${{ secrets.REPO_KEYSTORE_PASS }}
+          REPO_KEY_PASS: ${{ secrets.REPO_KEY_PASS }}
+        run: |
+          set -euo pipefail
+          # 这里**不再**掩码：`取执行体` 的第一步已经 job 级生效（同一把 PAT），
+          # 而二进制启动后第一件事也是 env.AddMask()。再掩一次是纯重复。
+
+          # 先报一句 cache 的现状。这一行是**"保留老版本"这条需求唯一的现场证据**：
+          # 第二轮起它应当大于 0，而如果是 0，说明 cache 没恢复成 —— 那时
+          # 二进制会为每个老版本打一条告警（见 cacheHint），两条日志正好对上。
+          mkdir -p "$APK_CACHE_DIR"
+          echo "cache 目录 $APK_CACHE_DIR 里有 $(find "$APK_CACHE_DIR" -name '*.apk' | wc -l) 个 APK"
+
+          # 路径来自取件那个复合动作导出的 `FORGE_EXEC`（见那里的说明）——
+          # 这里不再拼 `$GITHUB_WORKSPACE/$EXEC_ASSET`，那个 job 级 env 已经删了。
+          "$FORGE_EXEC" reconcile
+
+      # 这一条**只看一个东西**：**已经发布出去**的那份索引，是不是用我们那把
+      # 谁都认识不了的 key 之外的东西签的。
+      #
+      # 为什么值得单独一步：**用错 key 的失败是静默的**。签名照样成功、`jarsigner -verify`
+      # 照样报 `jar verified.`（自签证书链它根本没法验），产物看起来完全正常 ——
+      # 但每一个客户端都会在"确认指纹"那一步拒绝它，而那时已经发出去了。
+      # 而 keystore **一旦发布就不可轮换**（D61：换了要所有人删源重加），
+      # 所以"这一轮签的是不是那把 key"值得有一条独立的、钉死的断言。
+      #
+      # ⚠️ 为什么是**克隆 store 再验**而不是验工作区里的产物：二进制跑的是一份
+      # 临时浅克隆，`Ctx.Close()` 在它退出时就把它删了 —— 等这一步开始时，
+      # 本地那份已经不存在。而"已发布的那份"本来也更该验：它是客户端实际看到的东西，
+      # 顺带把"回写到底落没落地"一起验了。
+      #
+      # ⚠️ 这条断言的**位置**要说清楚：二进制在 `Reconcile` 那一步里已经提交并推送了，
+      # 所以它是**事后告警，不是闸门** —— 真签错了，东西已经发出去了，这一步只是
+      # 大声喊出来。要把它变成闸门，得挪进 `check-repo`（Go 侧、回写之前），
+      # 那是另一轮的改动。
+      - name: Verify the published index
+        if: always()
+        # ⚠️ **必须显式覆盖 shell。** GitHub 给内置 `bash` 用的命令行是
+        # `bash --noprofile --norc -e -o pipefail {0}` —— 那个 `-e` 写在命令行上，
+        # 脚本里的 `set -uo pipefail` **关不掉它**。少了下面这一行，"跑完所有断言、
+        # 一次给全结论"的设计就是空的：第一条非零命令静默终止整步，日志里只剩一句
+        # `##[error]Process completed with exit code 1.`（实测于 spike：0.3 秒 exit 1、
+        # 一行输出都没有）。这里的第一条命令就是 `keytool … | grep`，正是那种会
+        # 无声毙命的形状。
+        shell: bash --noprofile --norc -o pipefail {0}
+        env:
+          STORE_TOKEN: ${{ secrets.GH_PAT }}
+          # 上一次核对通过的指纹（run 35292918382）。**它不是秘密** —— 证书本来就是
+          # 公开的（每个客户端添加源时都会把指纹摆在用户面前让人确认，02 §2.7）。
+          # 写死在这里正是重点：它是一条"没被人换过"的钉子，从 secret 里读就自证不了。
+          WANT_FPR: A4:7E:2F:72:2F:A1:73:40:59:2D:43:CB:69:F7:0B:D7:33:E0:41:AC:B9:71:1A:ED:78:C6:C6:87:05:16:3D:C8
+          # 索引里 `repo.address` 该有的值。它是全链路上唯一一处**不在 Go 源码里**的钉子：
+          # Go 那边 `TestRepoURLConstantIsPublishable` 比的是常量自己（改错了一起错），
+          # 只有这里比的是**发布出去的那份索引**。
+          #
+          # ⚠️ **它是 secret 而不是本文件里的字面量**，理由与上面那条正好相反：
+          # 这个仓是**公有的**，而这个值按 D70 就是整套门禁的**唯一凭据** —— 客户端侧不做
+          # 任何认证，知道地址 = 能下载全部包（已实测：未认证 fetch 直接 200）。
+          # 写在这里等于把它公开。2026-09-27 发现 `df8812e` 已经这么公开过一次（值进了公有
+          # 历史，删文件取消不了，唯一补救是换域名，而那是全体重加源）⇒ 从这一行起不再复现。
+          #
+          # ⚠️ **代价如实记**：从 secret 里读就**没有**指纹那条"写死在此、自证没被人换过"的
+          # 性质 —— 有人同时改 Go 常量与这条 secret 时它照样绿。它仍然抓得住它存在的理由：
+          # **常量被误改**（改的人多半不知道这里还挂着一条 secret）。
+          #
+          # ⚠️ 它是**带 `/fdroid/repo` 后缀**的那一版，不是裸域名根 —— fdroidserver 硬性
+          # 要求 `repo_url` 以 `/repo` 结尾（`common.py:707`，2026-09-27 第一次带真实地址
+          # 的对账撞上的就是这条）。Go 那边对应 `model.FdroidRepoURL`；**别拿
+          # `model.RepoURL`（裸根）来设这条 secret**，那样这一步会恒红。
+          WANT_ADDR: ${{ secrets.WANT_ADDR }}
+          # 对账本身失败时，store 里那份是**上一轮**的产物，核对它没有意义。
+          # 这个值经 env 传进来，不在 run: 里插值（本仓的规矩：run: 是固定脚本文本）。
+          RUN_OUTCOME: ${{ steps.run.outcome }}
+        run: |
+          set -uo pipefail
+
+          if [ "$RUN_OUTCOME" != "success" ]; then
+            {
+              echo
+              echo "### 发布物核对：**跳过**"
+              echo
+              echo '`Reconcile` 这一步没有成功，store 里那份产物还是上一轮的 —— '
+              echo '核对它证明不了本轮的任何事。（本轮已经因为那一步变红了。）'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # ⚠️ 先验这一节的**自身前提**。少了这一步，一个没装上的 `jq` 会以
+          # "index-v2.json 里没有 repo.address" 的面目出现 —— 一条听起来像
+          # "产物坏了"、实际是"工具没装"的假故障。而这种假故障最容易的后果是
+          # 有人去改产物，而真正该改的是上面那份 apt 清单。
+          # （本步在编写时就在本机踩到过这个：本机没有 jq，于是整步报了一条
+          #  关于 repo.address 的假失败。）
+          for tool in git jq keytool; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "::error::找不到 \`$tool\` —— 本步跑不了，检查上面装工具链那一步的 apt 清单"
+              exit 1
+            fi
+          done
+
+          # ⚠️ 同一条道理再来一遍：`WANT_ADDR` 现在是一条 secret，没设时它就是个**空串** ——
+          # 而空串会让 ③ 变成"期望「」"这种读不懂的形状（且必然失败）。先在前提这一层说清楚，
+          # 别让它伪装成"产物坏了"。设它的命令见本文件 env 那段注释。
+          if [ -z "${WANT_ADDR:-}" ]; then
+            echo "::error::secret \`WANT_ADDR\` 没设（或设成了空）—— 本步没法核对发布出去的地址"
+            exit 1
+          fi
+
+          pass=0; failn=0; report=""
+          ok() { report+="- ✅ $1"$'\n'; pass=$((pass+1)); }
+          no() { report+="- ❌ $1"$'\n'; failn=$((failn+1)); }
+
+          # 用 credential.helper 而不是把 token 写进 URL：后者会让 PAT 出现在
+          # `git` 的**命令行参数**里（同一个容器里任何进程都看得见），而这个 helper
+          # 是 git 自己 fork 出来执行的一小段 sh，口令从环境变量里读，不进 argv、不落盘。
+          git config --global credential.helper \
+            '!f() { echo username=x-access-token; echo "password=$STORE_TOKEN"; }; f'
+
+          PUB="$RUNNER_TEMP/published"
+          rm -rf "$PUB"
+          if ! git clone --depth 1 --quiet https://github.com/market-of-labs/store.git "$PUB" 2>&1; then
+            echo "::error::克隆 store 失败 —— 下面没法核对"
+            exit 1
+          fi
+
+          # 「store 里还没有 repo/」不是这一节的业务。这一节管的是"**已经发布出去的
+          # 索引**是不是我们那把 key 签的"，而"该不该有索引"由二进制自己把守
+          # （BuildRepo 失败 ⇒ 不写回 ⇒ Reconcile 那一步已经红了）。
+          #
+          # 这个分支在迁移期是必需的：把容器化的 workflow 先落上、新版执行体后发布
+          # 的那段时间里，跑的还是旧二进制，它不产 `repo/`。少了这个分支，
+          # 那段时间的每日对账会**因为一个与它无关的理由**变红。
+          if [ ! -d "$PUB/repo" ]; then
+            {
+              echo
+              echo "### 发布物核对：**跳过**"
+              echo
+              echo 'store 里还没有 `repo/`。若这是迁移期，说明执行体还是**旧的**'
+              echo '（旧二进制产 apps.json，不产 F-Droid 索引）；若迁移早已完成，'
+              echo '那说明 `BuildRepo` 从没成功过 —— 去看 `Reconcile` 那一步的日志。'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # ① 产物在不在。这一条其实是"回写落地了"的独立复核：二进制自己报
+          # `committed=true`，而这里看的是**远端真的有了**。
+          if [ -f "$PUB/repo/entry.jar" ]; then
+            ok "store 里确实有 repo/entry.jar"
+          else
+            no "store 里没有 repo/entry.jar —— 回写没落地（或 repo/ 压根没提交）"
+          fi
+
+          # ② 签名指纹。`keytool -printcert -jarfile` 会把证书的 SHA256 指纹打成
+          # **带连字符**的 `SHA256: A4:7E:…`，而同一个输出里还有一行 20 字节的 SHA1 ——
+          # 所以按"32 组两位十六进制"去抽，正好只命中 SHA256 那一行。
+          # ⚠️ 别去日志里 grep fdroidserver 那句 `Creating signed index with this key`：
+          # 它在索引**没变化**的轮次里根本不打（fdroidserver 会跳过重新签名），
+          # 拿它当判据 = 每隔几轮假红一次。
+          got=$(keytool -printcert -jarfile "$PUB/repo/entry.jar" 2>/dev/null \
+                  | grep -oiE '([0-9A-F]{2}:){31}[0-9A-F]{2}' | head -1) || true
+          if [ -n "$got" ] && [ "$got" = "$WANT_FPR" ]; then
+            ok "发布出去的 entry.jar 用的是预期的那把 key"
+          else
+            no "签名指纹不对：实得「${got:-空}」，期望「$WANT_FPR」—— **客户端会拒绝这个源**"
+          fi
+
+          # ③ 索引里记的仓库地址。客户端拿 `repo.address` 去拼每个 APK 的下载地址，
+          # 所以地址不对 = 应用列表能出来、**一个都装不上**，而服务端这边不会有任何日志。
+          #
+          # 比的是"**发布出去的那份索引** vs 上面 env 里那条 secret"。这是全链路上唯一
+          # 不在 Go 源码里的钉子，所以它恰好能抓到 Go 那边抓不到的那种错：有人把常量改错了
+          # （`TestRepoURLConstantIsPublishable` 比的是常量自己，一起错也就一起绿）。
+          #
+          # ⚠️ 它从前是**告警**，理由是"占位值是有意的（CF 网关还没做），真把它变成失败
+          # 这条流水线会一直红到网关落地那天"。那个前提已经不成立：网关在伺服、地址也已经
+          # 在设备上走通。现在占位值再出现，只可能是有人编了一个占位值进去。
+          idx="$PUB/repo/index-v2.json"
+          # `-e` 让 jq 在"取出来是 null"时**自己**返回非零 —— 于是下面能把
+          # "jq 读不动这个文件"与"字段真的不在里面"分成两句说。合成一句的话，
+          # 前者会被读成后者，而两者的修法完全不同（一个是工具/权限，一个是产物）。
+          if ! addr=$(jq -er '.repo.address' "$idx" 2>/tmp/jq.err); then
+            no "读不出 index-v2.json 的 repo.address（jq 报：$(tr -d '\n' </tmp/jq.err | head -c 200)）"
+          elif [ "$addr" = "$WANT_ADDR" ]; then
+            # ⚠️ 这里**不打印值**：它是 secret，日志里只会被掩成 `***`，写上去反而让人以为坏了。
+            ok "索引里的 repo.address 与期望值逐字相符"
+          else
+            case "$addr" in
+              *.invalid*|*REPLACE-ME*)
+                no "index-v2.json 里的 repo.address 还是占位值（$addr）—— 客户端能列出应用但装不了任何一个"
+                ;;
+              "")
+                no "index-v2.json 的 repo.address 是空串 —— 客户端拼不出 APK 地址"
+                ;;
+              *)
+                # ⚠️ 这一支**只印指纹，不印值**。走到这里说明索引里的地址和 `WANT_ADDR` **不相等**，
+                # 于是两种可能：① 真有人改了常量（那是"错的"新地址，但它多半也是个真域名）；
+                # ② 只是 secret 被填错了 —— 而这时 `$addr` 就是**正确的那个地址**，印出来
+                # 等于在公有仓的日志里把它公开（D70）。两种情况都不该印。
+                # 指纹够用：把本机的地址 `printf %s … | sha256sum | cut -c1-12` 一比就知道是哪种。
+                no "index-v2.json 里的 repo.address 与期望值不符（实得 sha256:$(printf %s "$addr" | sha256sum | cut -c1-12)，期望 sha256:$(printf %s "$WANT_ADDR" | sha256sum | cut -c1-12)）—— 客户端会照它拼每个 APK 的地址，不符的后果是所有 APK 取不到"
+                ;;
+            esac
+          fi
+
+          pkgs=$(jq -r '.packages | length' "$idx" 2>/dev/null) || true
+
+          {
+            echo
+            echo "### 发布物核对"
+            echo
+            echo "**$pass 通过 / $failn 失败**"
+            echo
+            echo "$report"
+            echo
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 索引里的包数 | ${pkgs:-?} |"
+            # ⚠️ **这里不打印地址本身。** 这个仓是公有的，而那个值按 D70 就是门禁的凭据
+            # —— 摘要与日志一样是**任何人可读**的。只报相符/不符，值本身要么是 secret
+            # （日志里也会被掩成 `***`，印出来只会让人以为坏了），要么是"错的"那个值
+            # （那已经由上面那条 `❌` 说清楚了，不必在这里再抄一遍）。
+            if [ "${addr:-}" = "$WANT_ADDR" ]; then
+              echo "| \`repo.address\` | 与期望值相符 |"
+            else
+              echo "| \`repo.address\` | **不符** —— 见上面的 ❌ |"
+            fi
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "pass=$pass fail=$failn"
+          [ "$failn" -eq 0 ]

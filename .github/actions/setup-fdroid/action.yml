@@ -1,0 +1,75 @@
+name: setup-fdroid
+description: >-
+  装上这条流水线要的整条工具链（fdroidserver / jarsigner / bash / node / git / …），
+  并把每个工具的版本打进 step summary。
+
+# 为什么是一个 composite action 而不是让每个 workflow 各抄一份：这条 apt 清单
+# 从前逐字出现在 on-dispatch.yml 与 reconcile.yml 两个文件里，而它**没有任何一处
+# 可以只改一边** —— 少装一个 git 的症状是"配置都对，却连第一句 clone 都跑不起来"，
+# 少装一个 jq 的症状是"产物看起来坏了"（见下面那条断言步骤自身的说明）。
+# 两份拷贝迟早会漂移，漂移的代价是某一条入口莫名其妙地红。
+#
+# ⚠️ 它**不装**容器本身，也装不了：`container:` 是 job 级键，composite action 里没有
+# 任何位置能放它（同理还有 defaults: / permissions: / concurrency: / timeout-minutes: /
+# job 的 env:）。那几项仍然在每个 workflow 里各写一遍 —— 见 03 §4.5 的说明。
+runs:
+  using: composite
+  steps:
+    # 这条流水线要的每一样，缺一样都跑不起来：
+    #
+    #   fdroidserver          —— 生成索引与签名（主角）
+    #   default-jdk-headless  —— 提供 `jarsigner`，它是 JAR 签名的唯一实现路径；
+    #                            装了它就不必自己实现 PKCS#7
+    #   bash                  —— 给 workflow 里那个 `defaults: {run: {shell: bash}}` 用的，
+    #                            **不是**可有可无的包：容器 job 的默认 shell 是 sh(dash)，
+    #                            而 Debian 基础镜像里根本没有 bash。少了它，任何用 bash
+    #                            语法的 step 都会以 `…: not found` + exit 127 收场，
+    #                            而且报错行号指向函数体、看起来毫无线索（实测于 spike
+    #                            —— 那个 workflow 已于 2026-09-18 删除，证据与复现步骤见
+    #                            market-spec/spike/FDROID-REPO-REFS.md；下文提到 spike 处同）
+    #   nodejs                —— 给两个 JS action 用的（`robinraju/release-downloader`
+    #                            与 `actions/cache`）。⚠️ 这一条是**照着"容器里得有 node"
+    #                            装的，但那个前提从来没被单独验证过** —— 三个 action 都声明
+    #                            `using: node24`，而 trixie 的 nodejs 是 **20.19.2**。既然
+    #                            spike 里 `upload-artifact@v7`（同样是 node24）在同一个容器里
+    #                            跑过了，真正被用的多半是 runner 自己带进来的那个 node，
+    #                            容器这个只是备着。留着它的理由不是"确定需要"，而是
+    #                            **多装一个 node 无害，猜错却是整条红** —— 这种账在本仓
+    #                            一律往保守的一边算
+    #   git                   —— ⚠️ **二进制自己要用**：它靠 `internal/gitx` 调 git
+    #                            浅克隆 store、再推送回写。Debian 基础镜像里没有 git，
+    #                            漏了它的症状是"配置都对的，却连第一句 clone 都跑不起来"
+    #   unzip / jq / curl / ca-certificates —— 断言步骤与 HTTPS 取件
+    #
+    # 容器里就是 root，不需要 sudo。
+    - name: Install the toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends \
+          fdroidserver default-jdk-headless bash nodejs git \
+          unzip jq curl ca-certificates
+
+        # 把版本钉进 summary：fdroidserver / androguard 的行为**随版本变**
+        # （必须用 trixie 而不是 ubuntu-latest 的理由就是一次版本差异），
+        # 结论要能对应到具体版本才有意义。哪天这条流水线莫名其妙红了，先看这里有没有变。
+        #
+        # ⚠️ 表里带着 `androguard` / `java` / `python3` 三行，而**不是每条入口都真的
+        # 用得上它们**（只有 rebuild 那条路会走到 androguard 解析 APK）。统一打全表
+        # 是刻意的：多三行是纯收益 —— "这一轮的结论是不是在同一个环境里得的"这个
+        # 问题的答案永远完整，而分表只会让"哪张表缺了哪一行"变成一次人工比对。
+        {
+          echo "### 环境"
+          echo
+          echo '| 工具 | 输出 |'
+          echo '|---|---|'
+          echo "| \`fdroid\` | $(fdroid --version 2>&1 | head -1) |"
+          echo "| \`androguard\`(dpkg) | $(dpkg-query -W -f='${Version}' python3-androguard 2>/dev/null || echo '未知') |"
+          echo "| \`jarsigner\` | \`$(command -v jarsigner || echo '**不在 PATH**')\` |"
+          echo "| \`java\` | $(java -version 2>&1 | head -1) |"
+          echo "| \`git\` | $(git --version 2>&1) |"
+          echo "| \`node\` | $(node --version 2>&1 | head -1) |"
+          echo "| \`python3\` | $(python3 --version 2>&1) |"
+          echo
+        } >> "$GITHUB_STEP_SUMMARY"
