@@ -1,28 +1,15 @@
 version: 2
 
-# 三个仓库需要这个文件（依赖在哪，升级就该配在哪）：
-#   - `forge-core`：build.yml 的三个 action + go.mod；
-#   - `store`：beacon 复合动作里的 `actions/github-script`（它自己那一份在
-#     store/.github/dependabot.yml）；
-#   - 本仓库（`forge`）：`fetch-executor` 复合动作里的两个 —— `actions/cache@v6`
-#     与 `robinraju/release-downloader@v1`（拆工作流之前它们散在三个 workflow 里、
-#     逐字重复，现在只有这一处）。`on-dispatch.yml` 里那份逐字重复的同类步骤随该文件
-#     一起没了（2026-09-18，market-spec 03 §4.7 第 5 步）；`spike-fdroid-repo.yml`
-#     里那个 `actions/upload-artifact@v7` 也一样（同一天删）。
-#
-# 本仓库只有**两个**依赖，但正因为它们用的是主版本标签（`@v6` / `@v1`），不配这个就等于
-# 钉死在当前主版本上 —— 而这两个 action 跑的 job 握着能跨四个仓库的 PAT（03 §4.5 第 11
-# 条的例外），让它停在旧主版本上是这里最不该省的一道自动。
-#
-# 不花 Actions 分钟数：本仓库的 workflow 只由 `repository_dispatch` / `schedule` /
-# 手动触发，Dependabot 开的是普通 PR，跑不起来任何东西。它也**只开 PR**，不合并、
-# 不打 tag，碰不到"取执行体 → 执行"那条链。
+# 本仓库只有两个依赖（`fetch-executor` 里的 `actions/cache@v6` 与
+# `robinraju/release-downloader@v1`）。它们用的是主版本标签，不配这个就等于钉死在当前
+# 主版本上，而那两个 action 跑的 job 握着能跨仓库的 PAT。
+# Dependabot 只开 PR、不合并、不打 tag，碰不到"取执行体 → 执行"那条链。
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
-    # 只有两个依赖，合成一个 PR，别刷屏。
+    # 只有两个依赖，合成一个 PR。
     groups:
       actions:
         patterns: ['*']
