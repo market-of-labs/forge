@@ -105,7 +105,15 @@ jobs:
       # 真 keystore 的签字核对：这一步才把新二进制那把签名用起来 —— 读 secret 里的
       # keystore、装配、签出 `entry.jar`。它会先在覆盖之前读旧的已发布 jar 的证书指纹，
       # 与将要签出来的比 —— 不一致就直接失败，而不是静默发出一份所有客户端都拒收的仓库。
+      #
+      # `if: always()` 是必须的，2026-09-28 第一次真跑时踩到过：**切换之前对照一必然失败**
+      # （它比的是"已发布那把旧语义的索引"与账本，差异正好是 78 处时间戳 —— 见下方收尾那步）。
+      # 默认的 `if: success()` 会让上面那步一红就把这两步跳掉，于是**签名根本没跑**，
+      # 收尾那步接着去核克隆里**已发布的那份 jar** ⇒ 指纹照样相符、报出一片假绿，
+      # 而它对"新二进制的签名对不对"一个字都没说。签名与索引内容是两件独立的事。
       - name: 装配并用真 keystore 签名
+        id: sign
+        if: always()
         env:
           STORE_TOKEN: ${{ secrets.GH_PAT }}
           REPO_KEYSTORE_B64: ${{ secrets.REPO_KEYSTORE_B64 }}
@@ -117,6 +125,7 @@ jobs:
 
       # `jarsigner -verify` 是外部裁判：纯 Go 签出来的 jar 得让 JDK 认。
       - name: 对刚签出来的产物跑自检
+        if: always()
         env:
           STORE_TOKEN: ${{ secrets.GH_PAT }}
           REPO_KEYSTORE_B64: ${{ secrets.REPO_KEYSTORE_B64 }}
@@ -142,9 +151,13 @@ jobs:
           # 索引里 `repo.address` 该有的值。本仓是公有的，这个值等于门禁的唯一凭据
           # （客户端不做认证，知道地址 = 能下载全部包）⇒ 必须是 secret，不能写在这里。
           WANT_ADDR: ${{ secrets.WANT_ADDR }}
-          # 上面那三步失败时，工作副本里那份产物是半成品，核对它证明不了任何事。
+          # 上面两步各自的结论。**必须分开，不能揉成一个**：2026-09-28 第一次真跑时只有一个
+          # `VERIFY_OUTCOME`，于是「对照一红 → 签名那两步被 skip → 收尾去核克隆里已发布的旧
+          # jar → 指纹照样相符」⇒ 报出一片假绿，而它对"新二进制的签名对不对"一个字都没说。
+          # 索引内容与签名是两件独立的事，各有各的结论。
           # 经 env 传入，不在 run: 里插值（run: 是固定脚本文本）。
           VERIFY_OUTCOME: ${{ steps.verify.outcome }}
+          SIGN_OUTCOME: ${{ steps.sign.outcome }}
           VERSION: ${{ inputs.version }}
         run: |
           set -uo pipefail
@@ -161,31 +174,58 @@ jobs:
           fi
 
           pass=0; failn=0; report=""
-          ok() { report+="- ✅ $1"$'\n'; pass=$((pass+1)); }
-          no() { report+="- ❌ $1"$'\n'; failn=$((failn+1)); }
+          ok()   { report+="- ✅ $1"$'\n'; pass=$((pass+1)); }
+          no()   { report+="- ❌ $1"$'\n'; failn=$((failn+1)); }
+          # ⚠️ 只陈述、不计入通过/失败：用来把"这一条为什么没判"说清楚。
+          note() { report+="- ⚠️ $1"$'\n'; }
 
           REPO="$STORE_DIR/repo"
 
-          if [ "$VERIFY_OUTCOME" != "success" ]; then
-            no "上面那一步「核对索引」没成功（outcome=$VERIFY_OUTCOME）—— 先修它，那一步的结论是下面几条的前提"
+          # ---- 签名（本 workflow 在切换前的**唯一**判决）----
+          #
+          # 克隆里那份 `repo/entry.jar` 到底是不是**这一轮新签出来的**，取决于签名那一步成没成：
+          # 成了，它就是我们的产物，下面核指纹才有意义；没成，它还是 store 里那份已发布的旧
+          # jar，核它等于核旧的签名 —— 那正是第一次真跑时那片假绿的来源。
+          ours=0
+          if [ "$SIGN_OUTCOME" = "success" ]; then
+            ours=1
+            ok "「装配并用真 keystore 签名」跑完了 —— 下面核的是**这一轮新签出来的**产物"
           else
-            ok "对照一与对照二都跑完了（逐条结论在上面那一步的日志里）"
+            no "「装配并用真 keystore 签名」没成功（outcome=$SIGN_OUTCOME）—— 克隆里那份还是已发布的旧产物，**这一轮没有对新二进制的签名作出任何判断**"
           fi
 
-          if [ -f "$REPO/entry.jar" ]; then
+          if [ "$ours" -eq 1 ] && [ -f "$REPO/entry.jar" ]; then
             ok "签出来的产物里有 repo/entry.jar"
+          elif [ "$ours" -eq 0 ]; then
+            note "跳过 repo/entry.jar 的存在性：它现在指的不是这一轮的产物"
           else
-            no "没有 repo/entry.jar —— 签名那一步没写出来"
+            no "没有 repo/entry.jar —— 签名那一步报成功却没写出来"
           fi
 
           # `keytool` 输出里 SHA256 是"32 组两位十六进制"，而 SHA1 只有 20 字节，
           # 所以这个抽法正好只命中 SHA256 那一行。
-          got=$(keytool -printcert -jarfile "$REPO/entry.jar" 2>/dev/null \
-                  | grep -oiE '([0-9A-F]{2}:){31}[0-9A-F]{2}' | head -1) || true
-          if [ -n "$got" ] && [ "$got" = "$WANT_FPR" ]; then
-            ok "纯 Go 签出来的 entry.jar 用的是预期的那把 key"
+          if [ "$ours" -eq 1 ]; then
+            got=$(keytool -printcert -jarfile "$REPO/entry.jar" 2>/dev/null \
+                    | grep -oiE '([0-9A-F]{2}:){31}[0-9A-F]{2}' | head -1) || true
+            if [ -n "$got" ] && [ "$got" = "$WANT_FPR" ]; then
+              ok "纯 Go 签出来的 entry.jar 用的是预期的那把 key"
+            else
+              no "签名指纹不对：实得「${got:-空}」，期望「$WANT_FPR」—— **客户端会拒绝这个源**"
+            fi
           else
-            no "签名指纹不对：实得「${got:-空}」，期望「$WANT_FPR」—— **客户端会拒绝这个源**"
+            note "跳过指纹核对：**它现在只会核到旧的签名**，那正是第一次真跑时误报通过的那一条"
+          fi
+
+          # ---- 索引内容（切换前必然红，切换后应当绿）----
+          #
+          # 对照一比的是"已发布那把索引"与账本。切换**之前**线上那份是旧语义（`added` = 当年扫描
+          # 那一刻），账本说的是上游发布时间 ⇒ 差异是必然的，且实测恰好 78 处：58 个版本级
+          # `added` + 20 个 app 级 `lastUpdated`（两份索引各一遍），**零结构差异**。
+          # 所以这里如实报出来但不当作本步的失败 —— 它是信息，不是判决；切换之后它才该绿。
+          if [ "$VERIFY_OUTCOME" != "success" ]; then
+            note "「核对索引」outcome=$VERIFY_OUTCOME —— 切换之前这一步必然报差异（预期恰好 78 处时间戳，零结构差异），逐条在上面那一步的日志里；切换之后它应当变绿"
+          else
+            ok "对照一与对照二都跑完了，账本与已发布产物一致（逐条结论在上面那一步的日志里）"
           fi
 
           idx="$REPO/index-v2.json"
@@ -196,6 +236,18 @@ jobs:
           else
             # 不打印值：本仓是公有的，而它可能就是那个正确的地址。
             no "index-v2.json 里的 repo.address 与期望值不符（实得 sha256:$(printf %s "$addr" | sha256sum | cut -c1-12)，期望 sha256:$(printf %s "$WANT_ADDR" | sha256sum | cut -c1-12)）"
+          fi
+
+          # 汇总表里那一格，先算成一句话再插。**不能**写成
+          # `$( [ ... ] && echo 相符 \|\| echo 不符 )` —— 反斜杠转义过的 `\|\|` 在 bash 里不是
+          # `||`，而是当普通词传给了 `echo`：于是相符时那一格印出这半句代码本身，不符时整格空白。
+          # （这行是文件的旧内容，2026-09-28 在本机把这步实跑了六个情形才发现；在 CI 里它要等到
+          # 第 40 分钟才现形，而那时人只会看到表格歪了。）
+          addr_cell='**不符** —— 见上面的 ❌'
+          if [ -z "${addr:-}" ]; then
+            addr_cell='**读不出** —— 见上面的 ❌'
+          elif [ "$addr" = "$WANT_ADDR" ]; then
+            addr_cell='与期望值相符'
           fi
 
           pkgs=$(jq -r '.packages | length' "$idx" 2>/dev/null) || true
@@ -210,8 +262,10 @@ jobs:
             echo
             echo "| 项 | 值 |"
             echo "|---|---|"
+            echo "| 签名（真 keystore → \`jarsigner\`）| $( [ "$ours" -eq 1 ] && echo '✅ 本轮产物已核' || echo '❌ **没跑成** —— 见上面的 ❌' ) |"
+            echo "| 索引内容（对照一 / 对照二）| $( [ "$VERIFY_OUTCOME" = success ] && echo '✅ 一致' || echo '⚠️ 有差异 —— 切换**之前**预期恰好 78 处时间戳' ) |"
             echo "| 索引里的包数 | ${pkgs:-?} |"
-            echo "| \`repo.address\` | $( [ "${addr:-}" = "$WANT_ADDR" ] && echo 与期望值相符 \|\| echo '**不符** —— 见上面的 ❌' ) |"
+            echo "| \`repo.address\` | $addr_cell |"
             echo
             echo "**本 workflow 一个字节都没写 store**：它只往一个跑完就消失的克隆里写。"
           } >> "$GITHUB_STEP_SUMMARY"
