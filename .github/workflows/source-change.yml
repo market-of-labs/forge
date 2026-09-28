@@ -36,8 +36,8 @@ jobs:
     # 纯 Go，要用的 `git` 与 https 根证书 ubuntu-latest 自带，所以那两样一起撤了。
     # ⚠️ 原文写的"链尾会调 `Reconcile(OnlyID)`，那一步要 fdroidserver 重建索引"
     # **已经作废**：`Reconcile` 现在是纯 Go（扫描、写索引、签名、核签名全在进程内），
-    # 本入口连 apt 清单都没有了。唯一还需要 Debian 的是手动触发的 `verify-index.yml`
-    # （它要装 `fdroidserver`）。
+    # 本入口连 apt 清单都没有了 —— 全仓都没有了：同日本仓最后一个还需要容器的入口
+    # （`verify-index.yml`）也被删掉。
     # 上界，不是预留。
     timeout-minutes: 120
     steps:

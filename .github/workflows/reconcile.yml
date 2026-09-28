@@ -33,7 +33,8 @@ jobs:
     # **早已作废**：本 job 一个子进程都不开，扫描、写索引、签名、核签名全是纯 Go。
     # 撤掉之后本 job 要的东西 ubuntu-latest 全自带 —— `git` 浅克隆与回写、`jq` 读
     # index-v2.json、https 的根证书 —— 而执行体是 `CGO_ENABLED=0` 的静态件，不挑发行版。
-    # 唯一还需要 Debian 的是手动触发的 `verify-index.yml`（它要装 `fdroidserver`）。
+    # 同日本仓最后一个还需要容器的入口（`verify-index.yml`）也删了：全仓现在没有一处
+    # `container:`、也没有一处 apt 清单。
     #
     # 下面 ② 用的判据是执行体自己的 `verify-jar`，一个容器外的工具都不要。
     # 耗时随索引增长而增长（要逐个解析 repo/ 下已攒起来的每个 APK），不是常量。

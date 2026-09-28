@@ -32,8 +32,8 @@ jobs:
     # 容器当年只为给下面那个 composite action 一个裸的 root 环境 —— 它直接 `apt-get`
     # （不带 sudo），而 `container:` 是 job 级键、放不进 action 里。
     # 这条链上扫描、写索引、签名全是纯 Go，要用的 `git` 与 https 根证书 ubuntu-latest 自带，
-    # 所以那两样一起撤了。唯一还需要 Debian 的是手动触发的 `verify-index.yml`
-    # （它要装 `fdroidserver`）。
+    # 所以那两样一起撤了。同日本仓最后一个还需要容器的入口（`verify-index.yml`）也被
+    # 删掉：全仓现在没有一处 `container:`、也没有一处 apt 清单。
     #
     # ⚠️ 原文写的"搬完 `_incoming` 之后要 `RebuildAndCheck`（fdroidserver 重建索引）"
     # **已经作废**：`RebuildAndCheck` 现在是纯 Go。原文那句"少了它会在搬完文件之后才失败"
