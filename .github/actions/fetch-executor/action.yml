@@ -1,7 +1,8 @@
 name: fetch-executor
 description: >-
-  掩码 PAT、恢复跨轮 APK cache、从 forge-core 的 Release 浮动取最新执行体并补执行位；
-  最后把执行体路径导出成 `FORGE_EXEC`、把 cache 目录导出成 `APK_CACHE_DIR`。
+  掩码 PAT、恢复跨轮 APK cache、从 forge-core 的 Release 取执行体（默认浮动取 latest，
+  给 `version` 则取那个 tag）并补执行位；最后把执行体路径导出成 `FORGE_EXEC`、
+  把 cache 目录导出成 `APK_CACHE_DIR`。
 
 # PAT 会作为 `with.token` 交给第三方 action（`robinraju/release-downloader`）——
 # 这是"第三方 action 只进不握 PAT 的 job"那条规矩的已知例外。
@@ -17,6 +18,14 @@ inputs:
       而"能改的值"就是"会被改错的值"）。
     required: false
     default: forge-linux-amd64
+  version:
+    description: >-
+      要取的那个 tag（如 `v0.1.18-rc1`）。留空 = 浮动取 latest —— 写 store 的那三个
+      workflow 都留空，它们要的是"当前生产那一版"。
+      核对 workflow 必须填，而且**只能**填：它要验的是一个预发布 tag，而 `latest`
+      按设计跳过预发布 —— 填了才取得到"要核对的那个二进制"。
+    required: false
+    default: ''
 runs:
   using: composite
   steps:
@@ -47,11 +56,15 @@ runs:
 
     # 浮动取 latest（不钉 tag）：改完代码打个 tag，本仓库一个字都不用动，下一轮就换新版
     # —— 所以**删掉一个动词之前必须先让新二进制发出去**。
+    #
+    # 传了 `version` 就改取那个 tag。`latest` 与 `tag` 在那个 action 里是互斥的
+    # （两个都非空会直接报错），所以这里用 `version` 是否为空来二选一，而不是各传一半。
     - name: Fetch executor
       uses: robinraju/release-downloader@v1
       with:
         repository: market-of-labs/forge-core
-        latest: true
+        latest: ${{ inputs.version == '' }}
+        tag: ${{ inputs.version }}
         fileName: ${{ inputs.asset-name }}
         # 只能是 $GITHUB_WORKSPACE 下的相对路径 —— 本 job 不 checkout，那个目录是空的。
         out-file-path: .
