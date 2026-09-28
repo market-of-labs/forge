@@ -1,0 +1,220 @@
+name: 核对索引与签名
+
+# 手动触发，**不接受 repository_dispatch / schedule**：它不写 store，但它是个重活
+# （对照一要下几百 MB 的 APK、跑一遍 `fdroid update`），不该自己跑起来。
+#
+# 它回答的问题与每轮的 `check-repo` 不同。例行那一轮里生产者与裁判是同一个 —— 都是我们
+# 刚写下的代码 —— 它能查出发出去的东西**自洽不自洽**，查不出装配规则本身对不对（装配器
+# 少写一个字段、签名格式选错、keystore 读成了另一把钥匙，它全都是绿的）。这里引入第二个
+# 生产者（fdroidserver）与第二个裁判（jarsigner），并且**不发布、不落盘、不回写**：
+# 这一轮读到的任何东西都不该被它改掉，改掉之后就没有对照物了。
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          要核对的执行体 tag（如 `v0.1.18-rc1`）。**必填**：核对的对象是预发布 tag，
+          而 `latest` 按设计跳过预发布 —— 留空会取到当前生产那一版，那就成了自己核对
+          自己，而这恰恰是本 workflow 存在的理由。
+        required: true
+        type: string
+
+# 本仓库只有 workflow、没有源码，GITHUB_TOKEN 一个权限都不需要（取件与克隆全走 PAT）。
+permissions: {}
+
+# 自己的并发组，不与 `store-write` 同组：这个 job 一个字节都不写 store，没有理由去挤
+# 那三个写入口的队列（它一跑就是几十分钟，挤进去会把日常对账全堵住）。
+# 但仍要 cancel-in-progress: false —— 中途取消会留下半个工作区，而人看到的现象是
+# "核对到一半没了"，比排队更糟。
+concurrency:
+  group: verify-index
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    container:
+      image: debian:trixie
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 120
+    steps:
+      # `$/` 不是 `./`：容器里没有 git，本 job 也不 checkout 任何东西。
+      - name: 装工具链
+        uses: $/.github/actions/setup-fdroid
+
+      # 这里**必须**传 `version`。不传就是浮动取 latest，而预发布 tag 不在 latest 里。
+      - name: 取执行体
+        uses: $/.github/actions/fetch-executor
+        with:
+          token: ${{ secrets.GH_PAT }}
+          version: ${{ inputs.version }}
+
+      # 跨轮 APK cache 是**给旧二进制用的**：它靠盘上有那些字节才能把老版本留在索引里，
+      # 而这个 workflow 取到的是想取代它的新版本，一份都用不上。
+      #
+      # 删掉它是为了掐掉缓存那一步的**写回**：`fetch-executor` 的 key 是
+      # `fdroid-apks-v1-<run_id>`，即每跑一次都算一次 miss，于是 job 只要成功，那一整盘
+      # 就会被重新存成一个新条目 —— 这个手动 workflow 每跑一次就给 10 GB 的配额再添一份，
+      # 而配额满时的代价是**静默丢老版本**。路径不存在时 `actions/cache` 只告警不失败。
+      #
+      # 恢复那一步的耗时省不掉（它发生在 `fetch-executor` 里面）。这一段连同 cache 一起
+      # 在切换完成后的收尾里删掉。
+      - name: 丢掉这一盘用不上的 APK cache
+        run: |
+          set -euo pipefail
+          if [ -n "${APK_CACHE_DIR:-}" ]; then
+            rm -rf "$APK_CACHE_DIR"
+          fi
+
+      # 克隆到一个跑完就随 runner 一起消失的目录。后面 `build-repo` 会往这个克隆里写
+      # 片段与产物 —— 那是它该做的（它本来就是"写"的动词），只是**没有任何一步会推**：
+      # 推送只发生在 `reconcile` / `commit-back` 里，本文件不调那两个动词。
+      #
+      # 用 credential.helper 而不是把 token 写进 URL：后者会让 PAT 进 `git` 的命令行参数
+      # （同容器里任何进程都看得见）。
+      - name: 克隆 store
+        env:
+          STORE_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          git config --global credential.helper \
+            '!f() { echo username=x-access-token; echo "password=$STORE_TOKEN"; }; f'
+          audit="$RUNNER_TEMP/audit"
+          rm -rf "$audit"
+          git clone --depth 1 --quiet https://github.com/market-of-labs/store.git "$audit"
+          echo "STORE_DIR=$audit" >> "$GITHUB_ENV"
+
+      # 对照一（已发布 vs 账本）与对照二（fdroidserver 现产 vs 账本）。
+      #
+      # **必须排在 `build-repo` 之前**，顺序不能换：对照一读的是工作副本里已发布的
+      # `repo/`，而 `build-repo` 的 `copyProducts` 会拿我们自己的产物把它盖掉 ——
+      # 那之后比的就是自己跟自己，而且照样报"一致"。
+      - name: 核对索引
+        id: verify
+        env:
+          STORE_TOKEN: ${{ secrets.GH_PAT }}
+          REPO_KEYSTORE_B64: ${{ secrets.REPO_KEYSTORE_B64 }}
+          REPO_KEYSTORE_PASS: ${{ secrets.REPO_KEYSTORE_PASS }}
+          REPO_KEY_PASS: ${{ secrets.REPO_KEY_PASS }}
+        run: |
+          set -euo pipefail
+          "$FORGE_EXEC" verify-index
+
+      # 真 keystore 的签字核对：这一步才把新二进制那把签名用起来 —— 读 secret 里的
+      # keystore、装配、签出 `entry.jar`。它会先在覆盖之前读旧的已发布 jar 的证书指纹，
+      # 与将要签出来的比 —— 不一致就直接失败，而不是静默发出一份所有客户端都拒收的仓库。
+      - name: 装配并用真 keystore 签名
+        env:
+          STORE_TOKEN: ${{ secrets.GH_PAT }}
+          REPO_KEYSTORE_B64: ${{ secrets.REPO_KEYSTORE_B64 }}
+          REPO_KEYSTORE_PASS: ${{ secrets.REPO_KEYSTORE_PASS }}
+          REPO_KEY_PASS: ${{ secrets.REPO_KEY_PASS }}
+        run: |
+          set -euo pipefail
+          "$FORGE_EXEC" build-repo
+
+      # `jarsigner -verify` 是外部裁判：纯 Go 签出来的 jar 得让 JDK 认。
+      - name: 对刚签出来的产物跑自检
+        env:
+          STORE_TOKEN: ${{ secrets.GH_PAT }}
+          REPO_KEYSTORE_B64: ${{ secrets.REPO_KEYSTORE_B64 }}
+          REPO_KEYSTORE_PASS: ${{ secrets.REPO_KEYSTORE_PASS }}
+          REPO_KEY_PASS: ${{ secrets.REPO_KEY_PASS }}
+        run: |
+          set -euo pipefail
+          "$FORGE_EXEC" check-repo
+
+      # 最后一步独立于二进制再核一遍那三件"发出去就收不回来"的事。
+      # 用 `keytool` 而不是信二进制自己的话：同一个结论由两个实现分别得出才有意义。
+      # 必须显式覆盖 shell：GitHub 给内置 bash 的命令行上带 `-e`，脚本里的
+      # `set -uo pipefail` 关不掉它 —— 那会让"跑完所有断言、一次给全结论"变成
+      # 第一条非零命令就静默终止。
+      - name: 核对签名指纹与仓库地址
+        if: always()
+        shell: bash --noprofile --norc -o pipefail {0}
+        env:
+          STORE_TOKEN: ${{ secrets.GH_PAT }}
+          # 上一次核对通过的指纹。它不是秘密（证书本来就公开），写死在此正是重点：
+          # 从 secret 里读就自证不了"没被人换过"。
+          WANT_FPR: A4:7E:2F:72:2F:A1:73:40:59:2D:43:CB:69:F7:0B:D7:33:E0:41:AC:B9:71:1A:ED:78:C6:C6:87:05:16:3D:C8
+          # 索引里 `repo.address` 该有的值。本仓是公有的，这个值等于门禁的唯一凭据
+          # （客户端不做认证，知道地址 = 能下载全部包）⇒ 必须是 secret，不能写在这里。
+          WANT_ADDR: ${{ secrets.WANT_ADDR }}
+          # 上面那三步失败时，工作副本里那份产物是半成品，核对它证明不了任何事。
+          # 经 env 传入，不在 run: 里插值（run: 是固定脚本文本）。
+          VERIFY_OUTCOME: ${{ steps.verify.outcome }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -uo pipefail
+
+          for tool in keytool jq; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "::error::找不到 \`$tool\` —— 本步跑不了，检查上面装工具链那一步的 apt 清单"
+              exit 1
+            fi
+          done
+          if [ -z "${WANT_ADDR:-}" ]; then
+            echo "::error::secret \`WANT_ADDR\` 没设（或设成了空）—— 本步没法核对发布出去的地址"
+            exit 1
+          fi
+
+          pass=0; failn=0; report=""
+          ok() { report+="- ✅ $1"$'\n'; pass=$((pass+1)); }
+          no() { report+="- ❌ $1"$'\n'; failn=$((failn+1)); }
+
+          REPO="$STORE_DIR/repo"
+
+          if [ "$VERIFY_OUTCOME" != "success" ]; then
+            no "上面那一步「核对索引」没成功（outcome=$VERIFY_OUTCOME）—— 先修它，那一步的结论是下面几条的前提"
+          else
+            ok "对照一与对照二都跑完了（逐条结论在上面那一步的日志里）"
+          fi
+
+          if [ -f "$REPO/entry.jar" ]; then
+            ok "签出来的产物里有 repo/entry.jar"
+          else
+            no "没有 repo/entry.jar —— 签名那一步没写出来"
+          fi
+
+          # `keytool` 输出里 SHA256 是"32 组两位十六进制"，而 SHA1 只有 20 字节，
+          # 所以这个抽法正好只命中 SHA256 那一行。
+          got=$(keytool -printcert -jarfile "$REPO/entry.jar" 2>/dev/null \
+                  | grep -oiE '([0-9A-F]{2}:){31}[0-9A-F]{2}' | head -1) || true
+          if [ -n "$got" ] && [ "$got" = "$WANT_FPR" ]; then
+            ok "纯 Go 签出来的 entry.jar 用的是预期的那把 key"
+          else
+            no "签名指纹不对：实得「${got:-空}」，期望「$WANT_FPR」—— **客户端会拒绝这个源**"
+          fi
+
+          idx="$REPO/index-v2.json"
+          if ! addr=$(jq -er '.repo.address' "$idx" 2>/tmp/jq.err); then
+            no "读不出 index-v2.json 的 repo.address（jq 报：$(tr -d '\n' </tmp/jq.err | head -c 200)）"
+          elif [ "$addr" = "$WANT_ADDR" ]; then
+            ok "索引里的 repo.address 与期望值逐字相符"
+          else
+            # 不打印值：本仓是公有的，而它可能就是那个正确的地址。
+            no "index-v2.json 里的 repo.address 与期望值不符（实得 sha256:$(printf %s "$addr" | sha256sum | cut -c1-12)，期望 sha256:$(printf %s "$WANT_ADDR" | sha256sum | cut -c1-12)）"
+          fi
+
+          pkgs=$(jq -r '.packages | length' "$idx" 2>/dev/null) || true
+
+          {
+            echo
+            echo "### 索引与签名核对（执行体 \`$VERSION\`）"
+            echo
+            echo "**$pass 通过 / $failn 失败**"
+            echo
+            echo "$report"
+            echo
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 索引里的包数 | ${pkgs:-?} |"
+            echo "| \`repo.address\` | $( [ "${addr:-}" = "$WANT_ADDR" ] && echo 与期望值相符 \|\| echo '**不符** —— 见上面的 ❌' ) |"
+            echo
+            echo "**本 workflow 一个字节都没写 store**：它只往一个跑完就消失的克隆里写。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "pass=$pass fail=$failn"
+          [ "$failn" -eq 0 ]
