@@ -39,6 +39,13 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    # **本仓唯一还跑容器的入口**（2026-09-28 之后）。它留着的两条理由都还成立：
+    #   ① 下面那个 composite action 直接 `apt-get`（不带 sudo），需要一个裸 root 环境，
+    #      而 `container:` 是 job 级键、放不进 action 里；
+    #   ② **必须是 Debian**：对照二要跑真 `fdroid update`，而 ubuntu-latest 自带的
+    #      `fdroidserver 2.2.1` 解析现代 APK 会崩（trixie 的才行）。
+    #      ⚠️ ② 这条是**继承下来的结论，本轮没有重新验过** —— 撤它之前先真跑一次比对。
+    #      （另两个入口撤容器与这条无关：它们一个子进程都不开。）
     container:
       image: debian:trixie
     defaults:
@@ -48,9 +55,13 @@ jobs:
     steps:
       # `$/` 不是 `./`：容器里没有 git，本 job 也不 checkout 任何东西。
       #
+      # **本仓只剩这一个入口还在调这个动作**：例行那三个（reconcile / source-change /
+      # intake-incoming）已经跑在裸 `ubuntu-latest` 上、一个包都不装 —— 它们那条路上
+      # 扫描、写索引、签名、核签名全是纯 Go，要的 `git` / `jq` / 根证书 runner 都自带。
+      #
       # `fdroidserver: 'true'` 是**本入口独有**的一项：对照二需要一个真的第三方实现。
-      # 例行那三个入口（reconcile / source-change / intake-incoming）不传，apt 清单里也就
-      # 没有它 —— 它们那条路上扫描、写索引、签名全是纯 Go 的。
+      # 它硬依赖 JDK（`Depends`，`--no-install-recommends` 拦不住），所以这个容器里会有
+      # JVM —— 用它的只是 `fdroid update` 的签名后端，不是任何一条判据的裁判。
       - name: 装工具链
         uses: $/.github/actions/setup-fdroid
         with:

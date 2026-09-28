@@ -27,28 +27,23 @@ concurrency:
 jobs:
   intake-incoming:
     runs-on: ubuntu-latest
-    # 容器现在只为一件事存在：给下面那个 composite action 一个裸的 root 环境（它直接
-    # `apt-get`，不带 sudo），而 `container:` 是 job 级键、放不进 action 里。
+    # **裸的 ubuntu-latest：没有容器，也不装任何包**（2026-09-28 撤的）。
+    #
+    # 容器当年只为给下面那个 composite action 一个裸的 root 环境 —— 它直接 `apt-get`
+    # （不带 sudo），而 `container:` 是 job 级键、放不进 action 里。
+    # 这条链上扫描、写索引、签名全是纯 Go，要用的 `git` 与 https 根证书 ubuntu-latest 自带，
+    # 所以那两样一起撤了。唯一还需要 Debian 的是手动触发的 `verify-index.yml`
+    # （它要装 `fdroidserver`）。
     #
     # ⚠️ 原文写的"搬完 `_incoming` 之后要 `RebuildAndCheck`（fdroidserver 重建索引）"
     # **已经作废**：`RebuildAndCheck` 现在是纯 Go。原文那句"少了它会在搬完文件之后才失败"
-    # 仍然成立（工具链装不上就是那个时点红），只是原因不再是 fdroidserver。
-    container:
-      image: debian:trixie
-    # 容器 job 的默认 shell 是 sh(dash)，Debian 基础镜像里没有 bash。
-    defaults:
-      run:
-        shell: bash
+    # 也随之作废 —— 现在没有工具链可装，也就没有那个失败时点。
     # 上界，不是预留：与 reconcile 干的是同一件事，所以给同一个上界。
     timeout-minutes: 120
     steps:
-      # `$/` 不是 `./`：`./` 要求先 checkout，而本 job 的容器里没有 git，也不 checkout
-      # 任何东西（没有源码要取，store 是二进制自己浅克隆的）。顺序不能换：掩码是
-      # fetch-executor 的第一步。
-      - name: 装工具链
-        uses: $/.github/actions/setup-fdroid
-
-      # 顺带导出 `FORGE_EXEC`。
+      # 顺带导出 `FORGE_EXEC`。顺序不能换：掩码是 fetch-executor 的第一步。
+      # `$/` 不是 `./`：`$/` 指本仓根，不需要先 checkout（没有源码要取，
+      # store 是二进制自己浅克隆的）。
       - name: 取执行体
         uses: $/.github/actions/fetch-executor
         with:
