@@ -29,8 +29,14 @@ concurrency:
 jobs:
   source-change:
     runs-on: ubuntu-latest
-    # 必须有容器：新增单的链尾会调 `Reconcile(OnlyID)`，那一步要 fdroidserver 重建
-    # 索引、jarsigner 验签。变更单用不着，但走哪条路由单的正文决定，所以按最重的准备。
+    # 容器现在只为一件事存在：给下面那个 composite action 一个裸的 root 环境（它直接
+    # `apt-get`，不带 sudo），而 `container:` 是 job 级键、放不进 action 里。
+    #
+    # ⚠️ 原文写的"链尾会调 `Reconcile(OnlyID)`，那一步要 fdroidserver 重建索引"
+    # **已经作废**：`Reconcile` 现在是纯 Go（扫描、写索引、签名、核签名全在进程内），
+    # 本入口的 apt 清单里既没有 JDK 也没有 fdroidserver。容器留着只因为它是给 composite
+    # action 一个裸 root 环境的**唯一**办法；换不换成 ubuntu-latest 与上面那些理由无关，
+    # 也没验过，所以先不动。
     container:
       image: debian:trixie
     # 容器 job 的默认 shell 是 sh(dash)，Debian 基础镜像里没有 bash。

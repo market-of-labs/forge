@@ -25,8 +25,16 @@ concurrency:
 jobs:
   reconcile:
     runs-on: ubuntu-latest
-    # 必须是 Debian 容器：ubuntu-latest 自带的 `fdroidserver 2.2.1` 解析现代 APK 会崩，
-    # trixie 的才行。**别改回 ubuntu-latest。**
+    # 容器现在只为一件事存在：给下面那个 composite action 一个**裸的 root 环境**
+    # （它直接 `apt-get`，不带 sudo），而 `container:` 是 job 级键、放不进 action 里。
+    #
+    # ⚠️ 原文写的"必须是 Debian：ubuntu-latest 自带的 `fdroidserver 2.2.1` 解析现代 APK 会崩，
+    # trixie 的才行，别改回 ubuntu-latest"**已经作废** —— 那条理由是 fdroidserver 的，而这条
+    # 例行路一个子进程都不开（扫描、写索引、签名全是纯 Go）。本仓里唯一还装 fdroidserver 的是
+    # `verify-index.yml`，而它是手动触发的：例行这三个入口的 apt 清单里根本没有它。
+    # **但不要据此把容器撤掉**：换成 ubuntu-latest 行不行没验过，而这条理由与 JDK 无关 ——
+    # 容器只负责给那个 action 一个裸 root 环境。装工具链那一步的 apt 清单里没有 JDK，
+    # 下面 ② 用的判据是执行体自己的 `verify-jar`，不再需要任何容器外的工具。
     container:
       image: debian:trixie
     # 容器 job 的默认 shell 是 sh(dash)，Debian 基础镜像里没有 bash。
@@ -71,7 +79,7 @@ jobs:
           "$FORGE_EXEC" reconcile
 
       # 只看一件事：**已经发布出去**的那份索引是不是我们那把 key 签的。用错 key 的失败是
-      # 静默的（`jarsigner -verify` 照样绿），而 keystore 一旦发布就不可轮换。
+      # 静默的 —— 产物自洽、自检全绿，只有指纹这一比看得出来 —— 而 keystore 一旦发布就不可轮换。
       # 验的是克隆回来的 store，不是工作区 —— 二进制跑的临时浅克隆退出时就删了。
       # 位置：二进制在 `Reconcile` 里已经推送了，所以这是事后告警，不是闸门。
       - name: Verify the published index
@@ -87,8 +95,10 @@ jobs:
           WANT_FPR: A4:7E:2F:72:2F:A1:73:40:59:2D:43:CB:69:F7:0B:D7:33:E0:41:AC:B9:71:1A:ED:78:C6:C6:87:05:16:3D:C8
           # 索引里 `repo.address` 该有的值。本仓是公有的，这个值等于门禁的唯一凭据
           # （客户端不做认证，知道地址 = 能下载全部包）⇒ 必须是 secret，不能写在这里。
-          # 它是带 `/fdroid/repo` 后缀的那一版：fdroidserver 硬性要求 `repo_url` 以
-          # `/repo` 结尾，别拿裸域名根来设这条 secret，那样这一步会恒红。
+          # 它是带 `/fdroid/repo` 后缀的那一版，不是裸域名根的那个。别拿裸域名根来设这条
+          # secret：下面 ③ 会拿索引里的 `repo.address` 与它逐字比，设错了这一步恒红。
+          # 原文把这条要求归给 fdroidserver —— 那已经是过去式，今天定它的是写索引的那一段
+          # 自己（写进去的值与这里比对的期望值是同一个常量）。
           WANT_ADDR: ${{ secrets.WANT_ADDR }}
           # 对账本身失败时，store 里那份是上一轮的产物，核对它没有意义。
           # 经 env 传入，不在 run: 里插值（run: 是固定脚本文本）。
@@ -109,7 +119,7 @@ jobs:
 
           # 先验自身前提：没装上的 `jq` 会以"index-v2.json 里没有 repo.address"的面目
           # 出现 —— 一条听起来像"产物坏了"、实际是"工具没装"的假故障。
-          for tool in git jq keytool; do
+          for tool in git jq; do
             if ! command -v "$tool" >/dev/null 2>&1; then
               echo "::error::找不到 \`$tool\` —— 本步跑不了，检查上面装工具链那一步的 apt 清单"
               exit 1
@@ -160,16 +170,23 @@ jobs:
             no "store 里没有 repo/entry.jar —— 回写没落地（或 repo/ 压根没提交）"
           fi
 
-          # ② 签名指纹。`keytool` 输出里 SHA256 是"32 组两位十六进制"，而 SHA1 只有
-          # 20 字节，所以这个抽法正好只命中 SHA256 那一行。
-          # 别去 grep fdroidserver 那句 `Creating signed index with this key`：索引没变化
-          # 的轮次里它根本不打，拿它当判据 = 每隔几轮假红一次。
-          got=$(keytool -printcert -jarfile "$PUB/repo/entry.jar" 2>/dev/null \
+          # ② 产物自洽 + 签名指纹。`verify-jar` 做两件事：先走完完整摘要链与签名
+          #（条目、清单、`.SF`、签名四者互相对得上），再把签名者指纹打到 stdout。
+          # 两件都要，因为它们的覆盖面不同：一份内容原封不动、只换成另一把钥匙签的 jar
+          # 摘要链全过（`.SF` 只由清单决定，与钥匙无关），只有指纹那一比抓得住它；
+          # 反过来，`jar uf` 那类篡改把内容换掉、`META-INF/` 原样搬过去，签名本身依然有效，
+          # 只有摘要链抓得住。缺任何一半都等于没判。
+          #
+          # 输出形状与这里那句 grep 的抽法配套：**32 组两位十六进制**（SHA256 的长度；
+          # SHA1 只有 20 字节，命不中），失败时 stdout 是空的、原因在 stderr。
+          # 所以下面 `got` 为空有两种来源 —— 指纹不是那把钥匙、或产物根本没验过 ——
+          # 而后者不会静默：它的 stderr 就在这一步的日志里（这里特意不加 2>/dev/null）。
+          got=$("$FORGE_EXEC" verify-jar "$PUB/repo/entry.jar" \
                   | grep -oiE '([0-9A-F]{2}:){31}[0-9A-F]{2}' | head -1) || true
           if [ -n "$got" ] && [ "$got" = "$WANT_FPR" ]; then
-            ok "发布出去的 entry.jar 用的是预期的那把 key"
+            ok "发布出去的 entry.jar 摘要链与签名自洽，且用的是预期的那把 key"
           else
-            no "签名指纹不对：实得「${got:-空}」，期望「$WANT_FPR」—— **客户端会拒绝这个源**"
+            no "entry.jar 没过：指纹实得「${got:-空}」，期望「$WANT_FPR」—— 上面那步的 stderr 里有原因（摘要链坏了 / 签名验不过 / 不是那把钥匙），三者都会让**客户端拒绝这个源**"
           fi
 
           # ③ 索引里记的仓库地址：客户端拿它拼每个 APK 的下载地址，不对 = 应用列表能出来、

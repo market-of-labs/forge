@@ -1,7 +1,9 @@
 name: setup-fdroid
 description: >-
-  装上这条流水线要的整条工具链（jarsigner / bash / node / git / …），并把每个工具的版本
+  装上这条流水线要的整条工具链（bash / node / git / …），并把每个工具的版本
   打进 step summary。`fdroidserver` **默认不装**，只有 `verify-index` 那个手动入口按需要它。
+  任何入口的 apt 清单里都没有 JDK —— `verify-index` 那边会有一个，那是 `fdroidserver`
+  的硬依赖被动带来的。
 
 # 这条 apt 清单里少装哪一样，整条入口就莫名其妙地红：`bash` 不是可有可无的包
 # （容器 job 的默认 shell 是 sh(dash)，Debian 基础镜像里没有 bash），而 `git` 是
@@ -22,17 +24,20 @@ inputs:
 runs:
   using: composite
   steps:
-    # default-jdk-headless 提供 `jarsigner`（JAR 签名唯一的**外部**裁判，`check-repo` 要求它
-    # 报出字面量 `jar verified.`）；nodejs 给 `fetch-executor` 里那个 JS action
-    # （`robinraju/release-downloader`）用；unzip / jq / curl / ca-certificates 供断言步骤
-    # 与 HTTPS 取件。容器里就是 root，不需要 sudo。
+    # 这里**不装 JDK**。例行那三个入口（`reconcile` / `source-change` / `intake-incoming`）
+    # 扫描、写索引、签名、以及**核签名**全是纯 Go 的：`entry.jar` 的摘要链与指纹由执行体
+    # 自己的 `verify-jar` 判，一个子进程都不开。唯一还会带 JDK 的是手动触发的 `verify-index`，
+    # 而那是 `fdroidserver` 的**硬依赖**（`Depends`，`--no-install-recommends` 拦不住）
+    # 被动拉进来的，且那个入口里用 JVM 的是 `fdroid update` 的签名后端，不是任何一条判据的裁判。
+    # nodejs 给 `fetch-executor` 里那个 JS action（`robinraju/release-downloader`）用；
+    # unzip / jq / curl / ca-certificates 供断言步骤与 HTTPS 取件。容器里就是 root，不需要 sudo。
     - name: Install the toolchain
       shell: bash
       env:
         WITH_FDROIDSERVER: ${{ inputs.fdroidserver }}
       run: |
         set -euo pipefail
-        pkgs=(default-jdk-headless bash nodejs git unzip jq curl ca-certificates)
+        pkgs=(bash nodejs git unzip jq curl ca-certificates)
         if [ "$WITH_FDROIDSERVER" = "true" ]; then
           pkgs+=(fdroidserver)
         fi
@@ -40,10 +45,11 @@ runs:
         apt-get install -y -qq --no-install-recommends "${pkgs[@]}"
 
         # 把版本打进 summary：fdroidserver / androguard 的行为随版本变，结论要能对应到
-        # 具体版本才有意义。表统一打全（不按入口裁剪），**没装的那两行也照样打** ——
+        # 具体版本才有意义。表统一打全（不按入口裁剪），**没装的那几行也照样打** ——
         # 「这一轮没装它」与「装了但版本是空」是两件事，字面量摆在那里就不用猜。
-        # 用 command -v 判在场：直接跑 `python3 --version` 在缺它时会把
-        # `bash: python3: command not found` 当成版本打进表里。
+        # 用 command -v 判在场：直接跑 `python3 --version`（`java -version` 也一样）
+        # 在缺它时会把 `bash: xxx: command not found` 当成版本打进表里。
+        # `java` 那一行现在大多时候就是这么缺的 —— 例行三个入口一个 JDK 都不装。
         {
           echo "### 环境"
           echo
@@ -55,8 +61,7 @@ runs:
           else
             echo "| \`fdroid\` | **本入口不装**（只有核对入口需要它当第二个生产者） |"
           fi
-          echo "| \`jarsigner\` | \`$(command -v jarsigner || echo '**不在 PATH**')\` |"
-          echo "| \`java\` | $(java -version 2>&1 | head -1) |"
+          echo "| \`java\` | $(command -v java >/dev/null 2>&1 && java -version 2>&1 | head -1 || echo '**不在 PATH**（本入口不装 JDK）') |"
           echo "| \`git\` | $(git --version 2>&1) |"
           echo "| \`node\` | $(node --version 2>&1 | head -1) |"
           echo "| \`python3\` | $(command -v python3 >/dev/null 2>&1 && python3 --version 2>&1 || echo '**不在 PATH**') |"
