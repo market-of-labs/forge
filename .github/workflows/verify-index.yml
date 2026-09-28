@@ -41,8 +41,14 @@ jobs:
     timeout-minutes: 120
     steps:
       # `$/` 不是 `./`：容器里没有 git，本 job 也不 checkout 任何东西。
+      #
+      # `fdroidserver: 'true'` 是**本入口独有**的一项：对照二需要一个真的第三方实现。
+      # 例行那三个入口（reconcile / source-change / intake-incoming）不传，apt 清单里也就
+      # 没有它 —— 它们那条路上扫描、写索引、签名全是纯 Go 的。
       - name: 装工具链
         uses: $/.github/actions/setup-fdroid
+        with:
+          fdroidserver: 'true'
 
       # 这里**必须**传 `version`。不传就是浮动取 latest，而预发布 tag 不在 latest 里。
       - name: 取执行体
@@ -50,23 +56,6 @@ jobs:
         with:
           token: ${{ secrets.GH_PAT }}
           version: ${{ inputs.version }}
-
-      # 跨轮 APK cache 是**给旧二进制用的**：它靠盘上有那些字节才能把老版本留在索引里，
-      # 而这个 workflow 取到的是想取代它的新版本，一份都用不上。
-      #
-      # 删掉它是为了掐掉缓存那一步的**写回**：`fetch-executor` 的 key 是
-      # `fdroid-apks-v1-<run_id>`，即每跑一次都算一次 miss，于是 job 只要成功，那一整盘
-      # 就会被重新存成一个新条目 —— 这个手动 workflow 每跑一次就给 10 GB 的配额再添一份，
-      # 而配额满时的代价是**静默丢老版本**。路径不存在时 `actions/cache` 只告警不失败。
-      #
-      # 恢复那一步的耗时省不掉（它发生在 `fetch-executor` 里面）。这一段连同 cache 一起
-      # 在切换完成后的收尾里删掉。
-      - name: 丢掉这一盘用不上的 APK cache
-        run: |
-          set -euo pipefail
-          if [ -n "${APK_CACHE_DIR:-}" ]; then
-            rm -rf "$APK_CACHE_DIR"
-          fi
 
       # 克隆到一个跑完就随 runner 一起消失的目录。后面 `build-repo` 会往这个克隆里写
       # 片段与产物 —— 那是它该做的（它本来就是"写"的动词），只是**没有任何一步会推**：

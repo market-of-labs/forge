@@ -1,8 +1,7 @@
 name: fetch-executor
 description: >-
-  掩码 PAT、恢复跨轮 APK cache、从 forge-core 的 Release 取执行体（默认浮动取 latest，
-  给 `version` 则取那个 tag）并补执行位；最后把执行体路径导出成 `FORGE_EXEC`、
-  把 cache 目录导出成 `APK_CACHE_DIR`。
+  掩码 PAT、从 forge-core 的 Release 取执行体（默认浮动取 latest，
+  给 `version` 则取那个 tag）并补执行位；最后把执行体路径导出成 `FORGE_EXEC`。
 
 # PAT 会作为 `with.token` 交给第三方 action（`robinraju/release-downloader`）——
 # 这是"第三方 action 只进不握 PAT 的 job"那条规矩的已知例外。
@@ -31,29 +30,22 @@ runs:
   steps:
     # 掩码必须最先执行：`::add-mask::` 是 job 级生效，注册之后余下所有 step 的日志
     # （**包括下面那个第三方 action 自己打的**）都会被遮蔽。
-    # 顺带把 cache 目录经 $GITHUB_ENV 导出去，给调用方报现场证据用。
-    - name: Mask the token and export the cache dir
+    - name: Mask the token
       shell: bash
       env:
         MASK: ${{ inputs.token }}
-        CACHE_DIR: ${{ github.workspace }}/apk-cache
       run: |
         set -euo pipefail
         echo "::add-mask::$MASK"
-        echo "APK_CACHE_DIR=$CACHE_DIR" >> "$GITHUB_ENV"
 
-    # 两个写入口共用这一盘 cache、这一个 key 前缀（`fdroid-apks-v1-`）：key 必须是滚动
-    # key，绝不能挂在 `hashFiles('sources/**')` 上（那样每改一个来源整盘失效、老版本全丢）。
-    # 目录必须在 store 克隆之外 —— 那个克隆每轮都被删。
-    # 边界：本 job 只要有任何一个 step 失败，这一轮的 cache 就不会存（`post-if` 是 `success()`）。
-    - name: Restore the APK cache
-      uses: actions/cache@v6
-      with:
-        path: ${{ github.workspace }}/apk-cache
-        key: fdroid-apks-v1-${{ github.run_id }}
-        restore-keys: |
-          fdroid-apks-v1-
-
+    # 这里原本还有一步 `Restore the APK cache`（`actions/cache@v6`，key
+    # `fdroid-apks-v1-<run_id>`，目录 `$GITHUB_WORKSPACE/apk-cache`）。2026-09-28 连同它的
+    # 写回一起删了：从那一天起执行体是纯 Go 的，扫描、写索引、签名三件事都不再开子进程，
+    # 盘上有没有老 APK 只影响"这一轮要不要顺手抽个图标"，**不再影响索引里有哪几个版本**
+    # （版本由账本 `sources/` 决定）。删它的实际理由是配额：那一盘每轮 +600 MB–1 GB，
+    # 而配额满时 `actions/cache` 的代价是**静默丢老版本** —— 一个已经没有任何输入价值的
+    # 中间产物，不该握着一票否决权。
+    #
     # 浮动取 latest（不钉 tag）：改完代码打个 tag，本仓库一个字都不用动，下一轮就换新版
     # —— 所以**删掉一个动词之前必须先让新二进制发出去**。
     #

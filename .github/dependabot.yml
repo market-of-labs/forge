@@ -1,15 +1,15 @@
 version: 2
 
-# 本仓库只有两个依赖（`fetch-executor` 里的 `actions/cache@v6` 与
-# `robinraju/release-downloader@v1`）。它们用的是主版本标签，不配这个就等于钉死在当前
-# 主版本上，而那两个 action 跑的 job 握着能跨仓库的 PAT。
+# 本仓库只剩一个第三方依赖：`fetch-executor` 里的 `robinraju/release-downloader@v1`
+# （`actions/cache@v6` 已在 2026-09-28 随跨轮 APK cache 一起删掉）。它用的是主版本标签，
+# 不配这个就等于钉死在当前主版本上，而它跑的 job 握着能跨仓库的 PAT。
 # Dependabot 只开 PR、不合并、不打 tag，碰不到"取执行体 → 执行"那条链。
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
-    # 只有两个依赖，合成一个 PR。
+    # 只有这一个依赖，仍然保留分组：以后再加 action 时不必想起来补这一段。
     groups:
       actions:
         patterns: ['*']

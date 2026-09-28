@@ -42,8 +42,7 @@ jobs:
       - name: 装工具链
         uses: $/.github/actions/setup-fdroid
 
-      # 取执行体（浮动取 latest），顺带恢复跨轮 APK cache 并导出 `FORGE_EXEC` /
-      # `APK_CACHE_DIR`；那些理由都写在那个动作里。
+      # 取执行体（浮动取 latest）并导出 `FORGE_EXEC`；那些理由都写在那个动作里。
       - name: 取执行体
         uses: $/.github/actions/fetch-executor
         with:
@@ -65,12 +64,10 @@ jobs:
           REPO_KEY_PASS: ${{ secrets.REPO_KEY_PASS }}
         run: |
           set -euo pipefail
-          # 现场证据：cache 里有几个 APK —— 这一轮索引里的老版本就是从这里凑出来的，
-          # 0 说明 cache 没恢复成，"保留老版本"不成立。这里不再掩码：`取执行体`
-          # 的第一步已经 job 级生效。
-          mkdir -p "$APK_CACHE_DIR"
-          echo "cache 目录 $APK_CACHE_DIR 里有 $(find "$APK_CACHE_DIR" -name '*.apk' | wc -l) 个 APK"
-
+          # 这里原有一行"cache 目录里有几个 APK"的现场证据，2026-09-28 随跨轮 APK cache
+          # 一起删了。它当年回答的是"这一轮索引里的老版本是不是从 cache 里凑出来的" ——
+          # 那个问题在账本成为唯一事实源之后就不存在了：盘上有几个 APK 不再决定索引里有
+          # 几个版本，`sources/` 决定。
           "$FORGE_EXEC" reconcile
 
       # 只看一件事：**已经发布出去**的那份索引是不是我们那把 key 签的。用错 key 的失败是

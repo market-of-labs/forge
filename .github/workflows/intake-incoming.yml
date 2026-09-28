@@ -45,7 +45,7 @@ jobs:
       - name: 装工具链
         uses: $/.github/actions/setup-fdroid
 
-      # 顺带导出 `FORGE_EXEC` 与 `APK_CACHE_DIR`。
+      # 顺带导出 `FORGE_EXEC`。
       - name: 取执行体
         uses: $/.github/actions/fetch-executor
         with:
@@ -60,9 +60,5 @@ jobs:
           REPO_KEY_PASS: ${{ secrets.REPO_KEY_PASS }}
         run: |
           set -euo pipefail
-          # 现场证据：这一轮索引里的老版本是从 cache 凑出来的，0 说明搬运会缩小索引。
-          # 这里不再掩码：fetch-executor 的掩码已经 job 级生效。
-          mkdir -p "$APK_CACHE_DIR"
-          echo "cache 目录 $APK_CACHE_DIR 里有 $(find "$APK_CACHE_DIR" -name '*.apk' | wc -l) 个 APK"
-
+          # 这里原有一行"cache 目录里有几个 APK"，随跨轮 APK cache 一起删（2026-09-28）。
           "$FORGE_EXEC" intake-incoming

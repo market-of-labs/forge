@@ -44,8 +44,8 @@ jobs:
       - name: 装工具链
         uses: $/.github/actions/setup-fdroid
 
-      # 顺带导出 `FORGE_EXEC` 与 `APK_CACHE_DIR`。本 job 不碰 `_incoming`，但新增单链尾
-      # 的 `Reconcile(OnlyID)` 照样要为索引里其余老版本凑齐 APK。
+      # 顺带导出 `FORGE_EXEC`。本 job 不碰 `_incoming`，但链尾的 `Reconcile(OnlyID)`
+      # 照样会重建整份索引。
       - name: 取执行体
         uses: $/.github/actions/fetch-executor
         with:
@@ -63,8 +63,5 @@ jobs:
           ISSUE: ${{ github.event.inputs.issue || github.event.client_payload.issue }}
         run: |
           set -euo pipefail
-          # 现场证据：0 意味着一次收录会缩小索引。
-          mkdir -p "$APK_CACHE_DIR"
-          echo "cache 目录 $APK_CACHE_DIR 里有 $(find "$APK_CACHE_DIR" -name '*.apk' | wc -l) 个 APK"
-
+          # 这里原有一行"cache 目录里有几个 APK"，随跨轮 APK cache 一起删（2026-09-28）。
           "$FORGE_EXEC" intake-issue
