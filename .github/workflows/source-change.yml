@@ -41,8 +41,10 @@ jobs:
     # 上界，不是预留。
     timeout-minutes: 120
     steps:
-      # 顺带导出 `FORGE_EXEC`。本 job 不碰 `_incoming`，但链尾的 `Reconcile(OnlyID)`
-      # 照样会重建整份索引。
+      # 顺带导出 `FORGE_EXEC`。本 job 不碰 `_incoming`，链尾**也不一定有对账**：新增单走
+      # `Reconcile(OnlyID)`，那一趟会重写整份索引（内容上只动这一个应用）；**变更单只改那一个
+      # 来源文件就提交**（`intake.go` 的变更分支），索引与 README 那张表要等下一轮对账 —— 那张单
+      # 给用户的答复本来就是"下一轮生效"。
       # `$/` 不是 `./`：`$/` 指本仓根，不需要先 checkout。
       - name: 取执行体
         uses: $/.github/actions/fetch-executor
