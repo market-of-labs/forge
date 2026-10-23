@@ -9,7 +9,7 @@ on:
   schedule:
     # 每天北京 02:17（= 前一天 18:17 UTC）。GitHub 的 cron 只认 UTC。定在凌晨窗口的
     # 开头，是为了给整轮的超时预算留下余量；用非整点分钟避开全网同时打 API。
-    - cron: '17 18 * * *'
+    - cron: '17 */6 * * *'
   workflow_dispatch:
 
 # 本仓库只有 workflow、没有源码，GITHUB_TOKEN 一个权限都不需要（取件与回写全走 PAT）。
